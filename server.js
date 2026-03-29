@@ -13,17 +13,17 @@ const io = new Server(httpServer, {
 });
 
 const PORT = process.env.PORT || 3000;
-const TICK_RATE = 60;       // фізика рахується 60 разів/сек
+const TICK_RATE = 60;
 const TICK_MS = 1000 / TICK_RATE;
-const SYNC_RATE = 10;       // звичайний broadcast стану — 10 разів/сек
-const SYNC_MS = 1000 / SYNC_RATE;
 
 // ── КОНСТАНТИ (мають збігатись з клієнтом) ──
-const W = 520, H = 520, BR = 8, SMAX = 13, C = 88;
+const W = 520, H = 520, BR = 8, SMAX = 6.5, C = 88;
 const PL = 54, PLV = 54, PTH = 16, PTV = 16;
 const ML = 10, EPU = 1 / 3, ECR = 1 / 10000;
 const FDR = 380, BMULT = 1.55, FR = 36, RD = 2000;
-const PS = 9; // paddle speed px/tick
+const PS = 4.5; // paddle speed px/tick (50% від оригінального)
+const FUEL_DRAIN = 0.15 / 60;   // витрата палива за тік руху (15% за секунду)
+const FUEL_REGEN = 0.15 / 60;   // відновлення палива за тік без руху
 
 const SLOTS = [0, 1, 2, 3];
 const BOT_NAMES = ['ZEPHYR', 'GLITCH', 'NOVA', 'STORM', 'BLAZE', 'PIXEL'];
@@ -193,8 +193,8 @@ function spawnBall(gs) {
   let vx, vy, a = 0;
   do {
     const ang = (Math.random()*0.7+0.15)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
-    vx = Math.cos(ang)*(3.5+Math.random()*1.5);
-    vy = Math.sin(ang)*(3.5+Math.random()*1.5);
+    vx = Math.cos(ang)*(1.75+Math.random()*0.75);
+    vy = Math.sin(ang)*(1.75+Math.random()*0.75);
     a++;
   } while ((Math.abs(vx)<1.8||Math.abs(vy)<1.8) && a<30);
   gs.ball = { x: W/2, y: H/2, vx: 0, vy: 0 };
@@ -212,6 +212,7 @@ function createGameState(room) {
     fields: { 0:{active:false,t:0}, 1:{active:false,t:0}, 2:{active:false,t:0}, 3:{active:false,t:0} },
     eliminated: { 0: false, 1: false, 2: false, 3: false },
     botTargets: { 0: W/2, 1: W/2, 2: H/2, 3: H/2 },
+    fuel: { 0: 1, 1: 1, 2: 1, 3: 1 },
     gameOver: false,
     winner: null,
     tick: 0,
@@ -252,8 +253,16 @@ function tick(room) {
     const isHoriz = view === 'top' || view === 'bottom';
     const mn = isHoriz ? C+PL/2 : C+PLV/2;
     const mx = isHoriz ? W-C-PL/2 : H-C-PLV/2;
-    if (inp.left)  gs.paddles[s] = Math.max(mn, gs.paddles[s] - PS);
-    if (inp.right) gs.paddles[s] = Math.min(mx, gs.paddles[s] + PS);
+    const moving = inp.left || inp.right;
+    if (moving && gs.fuel[s] > 0) {
+      // Рухаємось тільки якщо є паливо
+      if (inp.left)  gs.paddles[s] = Math.max(mn, gs.paddles[s] - PS);
+      if (inp.right) gs.paddles[s] = Math.min(mx, gs.paddles[s] + PS);
+      gs.fuel[s] = Math.max(0, gs.fuel[s] - FUEL_DRAIN);
+    } else if (!moving) {
+      // Відновлення палива коли не рухається
+      gs.fuel[s] = Math.min(1, gs.fuel[s] + FUEL_REGEN);
+    }
     if (inp.boost && !gs.fields[s].active && gs.energy[s] >= EPU) {
       gs.fields[s].active = true; gs.fields[s].t = 0;
       gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
@@ -291,7 +300,7 @@ function tick(room) {
       gs.ball.vx = gs.respawn.vx;
       gs.ball.vy = gs.respawn.vy;
     }
-    broadcastEvent(room, 'spawn');
+    broadcastState(room);
     return;
   }
 
@@ -302,13 +311,11 @@ function tick(room) {
   // Силові поля
   for (const s of SLOTS) {
     if (gs.eliminated[s]) continue;
-    if (applyFF(gs, s)) { broadcastEvent(room, 'field'); return; }
+    if (applyFF(gs, s)) { broadcastState(room); return; }
   }
 
   // Кути
-  let hadChamfer=false;
-  for(let i=0;i<3;i++) if(resolveChamfers(gs)){hadChamfer=true;break;}
-  if(hadChamfer) broadcastEvent(room,'wall');
+  for(let i=0;i<3;i++) if(resolveChamfers(gs)) break;
   clampBall(gs);
 
   // Ракетки
@@ -325,7 +332,7 @@ function tick(room) {
         gs.ball.vx = view==='left' ? Math.abs(gs.ball.vx) : -Math.abs(gs.ball.vx);
       }
       addSpin(gs, p);
-      broadcastEvent(room, 'paddle');
+      broadcastState(room);
       return;
     }
   }
@@ -352,26 +359,7 @@ function tick(room) {
   else if (bx-BR<0 && by>C && by<H-C) { if (!goal(2)) gs.ball.vx= Math.abs(gs.ball.vx); }
   else if (bx+BR>W && by>C && by<H-C) { if (!goal(3)) gs.ball.vx=-Math.abs(gs.ball.vx); }
 
-  // Звичайний broadcast стану — тільки 10 разів/сек (підстраховка)
-  gs.tick++;
-  if (gs.tick % Math.round(TICK_RATE/SYNC_RATE) === 0) {
-    broadcastState(room);
-  }
-}
-
-// Надсилаємо подію взаємодії з м'ячем — одразу всім
-// Клієнти отримають точну позицію і вектор і продовжать рахувати самі
-function broadcastEvent(room, type) {
-  const gs = room.game;
-  if (!gs) return;
-  io.to(room.id).emit('ball:event', {
-    type,                                    // 'paddle'|'field'|'wall'|'spawn'
-    x: Math.round(gs.ball.x*10)/10,
-    y: Math.round(gs.ball.y*10)/10,
-    vx: Math.round(gs.ball.vx*1000)/1000,
-    vy: Math.round(gs.ball.vy*1000)/1000,
-    t: Date.now(),                           // таймстемп для компенсації затримки
-  });
+  broadcastState(room);
 }
 
 function broadcastState(room) {
@@ -395,6 +383,12 @@ function broadcastState(room) {
       Math.round(gs.energy[1]*100),
       Math.round(gs.energy[2]*100),
       Math.round(gs.energy[3]*100),
+    ],
+    fu: [ // fuel 0-100
+      Math.round(gs.fuel[0]*100),
+      Math.round(gs.fuel[1]*100),
+      Math.round(gs.fuel[2]*100),
+      Math.round(gs.fuel[3]*100),
     ],
     f: [ // fields active
       gs.fields[0].active?1:0,
