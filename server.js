@@ -13,8 +13,10 @@ const io = new Server(httpServer, {
 });
 
 const PORT = process.env.PORT || 3000;
-const TICK_RATE = 60;
+const TICK_RATE = 60;       // фізика рахується 60 разів/сек
 const TICK_MS = 1000 / TICK_RATE;
+const SYNC_RATE = 10;       // звичайний broadcast стану — 10 разів/сек
+const SYNC_MS = 1000 / SYNC_RATE;
 
 // ── КОНСТАНТИ (мають збігатись з клієнтом) ──
 const W = 520, H = 520, BR = 8, SMAX = 13, C = 88;
@@ -289,7 +291,7 @@ function tick(room) {
       gs.ball.vx = gs.respawn.vx;
       gs.ball.vy = gs.respawn.vy;
     }
-    broadcastState(room);
+    broadcastEvent(room, 'spawn');
     return;
   }
 
@@ -300,11 +302,13 @@ function tick(room) {
   // Силові поля
   for (const s of SLOTS) {
     if (gs.eliminated[s]) continue;
-    if (applyFF(gs, s)) { broadcastState(room); return; }
+    if (applyFF(gs, s)) { broadcastEvent(room, 'field'); return; }
   }
 
   // Кути
-  for (let i=0; i<3; i++) if (resolveChamfers(gs)) break;
+  let hadChamfer=false;
+  for(let i=0;i<3;i++) if(resolveChamfers(gs)){hadChamfer=true;break;}
+  if(hadChamfer) broadcastEvent(room,'wall');
   clampBall(gs);
 
   // Ракетки
@@ -321,7 +325,7 @@ function tick(room) {
         gs.ball.vx = view==='left' ? Math.abs(gs.ball.vx) : -Math.abs(gs.ball.vx);
       }
       addSpin(gs, p);
-      broadcastState(room);
+      broadcastEvent(room, 'paddle');
       return;
     }
   }
@@ -348,7 +352,26 @@ function tick(room) {
   else if (bx-BR<0 && by>C && by<H-C) { if (!goal(2)) gs.ball.vx= Math.abs(gs.ball.vx); }
   else if (bx+BR>W && by>C && by<H-C) { if (!goal(3)) gs.ball.vx=-Math.abs(gs.ball.vx); }
 
-  broadcastState(room);
+  // Звичайний broadcast стану — тільки 10 разів/сек (підстраховка)
+  gs.tick++;
+  if (gs.tick % Math.round(TICK_RATE/SYNC_RATE) === 0) {
+    broadcastState(room);
+  }
+}
+
+// Надсилаємо подію взаємодії з м'ячем — одразу всім
+// Клієнти отримають точну позицію і вектор і продовжать рахувати самі
+function broadcastEvent(room, type) {
+  const gs = room.game;
+  if (!gs) return;
+  io.to(room.id).emit('ball:event', {
+    type,                                    // 'paddle'|'field'|'wall'|'spawn'
+    x: Math.round(gs.ball.x*10)/10,
+    y: Math.round(gs.ball.y*10)/10,
+    vx: Math.round(gs.ball.vx*1000)/1000,
+    vy: Math.round(gs.ball.vy*1000)/1000,
+    t: Date.now(),                           // таймстемп для компенсації затримки
+  });
 }
 
 function broadcastState(room) {
