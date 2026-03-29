@@ -1,6 +1,6 @@
-// Сервер v3 — арбітр голів + розумний matchmaking
-// Таймер скидається коли підключається новий гравець
-// Якщо 4 гравці — старт одразу
+// Сервер v4 — slot-based, нейтральні координати
+// Кожен гравець отримує slot 0-3
+// Позиції ракеток передаються як percent (0.0-1.0)
 
 const { createServer } = require('http');
 const { Server } = require('socket.io');
@@ -14,23 +14,25 @@ const io = new Server(httpServer, {
 
 const PORT = process.env.PORT || 3000;
 const ML = 10;
-const POSITIONS = ['bottom', 'top', 'left', 'right'];
+const SLOTS = [0, 1, 2, 3]; // 0=bottom, 1=top, 2=left, 3=right (з точки зору slot0)
 const BOT_NAMES = ['ZEPHYR', 'GLITCH', 'NOVA', 'STORM', 'BLAZE', 'PIXEL'];
 
 const rooms = new Map();
 
 function createRoom(id) {
   return {
-    id, players: {}, bots: {},
+    id,
+    players: {}, // socketId -> { slot, nick, rating, uid }
+    bots: {},    // slot -> { nick, rating }
     status: 'waiting',
     countdownTimer: null,
     game: {
-      lives: { top: ML, bottom: ML, left: ML, right: ML },
-      scores: { top: 0, bottom: 0, left: 0, right: 0 },
-      eliminated: { top: false, bottom: false, left: false, right: false },
-      paddles: { top: 260, bottom: 260, left: 260, right: 260 },
-      energy: { top: 1, bottom: 1, left: 1, right: 1 },
-      fields: { top: false, bottom: false, left: false, right: false },
+      lives: { 0: ML, 1: ML, 2: ML, 3: ML },
+      scores: { 0: 0, 1: 0, 2: 0, 3: 0 },
+      eliminated: { 0: false, 1: false, 2: false, 3: false },
+      paddles: { 0: 0.5, 1: 0.5, 2: 0.5, 3: 0.5 }, // percent 0-1
+      energy: { 0: 1, 1: 1, 2: 1, 3: 1 },
+      fields: { 0: false, 1: false, 2: false, 3: false },
       started: false,
       winner: null,
     }
@@ -38,10 +40,9 @@ function createRoom(id) {
 }
 
 function findOrCreateRoom() {
-  for (const [id, room] of rooms) {
-    if (room.status === 'waiting' || room.status === 'countdown') {
-      if (Object.keys(room.players).length < 4) return room;
-    }
+  for (const [, room] of rooms) {
+    if ((room.status === 'waiting' || room.status === 'countdown') &&
+        Object.keys(room.players).length < 4) return room;
   }
   const id = 'room_' + Math.random().toString(36).slice(2, 8);
   const room = createRoom(id);
@@ -49,52 +50,56 @@ function findOrCreateRoom() {
   return room;
 }
 
-function getAvailablePos(room) {
-  const taken = Object.values(room.players).map(p => p.pos);
-  return POSITIONS.find(p => !taken.includes(p));
+function getAvailableSlot(room) {
+  const taken = Object.values(room.players).map(p => p.slot);
+  return SLOTS.find(s => !taken.includes(s));
 }
 
 function fillBots(room) {
   room.bots = {};
   let bi = 0;
-  for (const pos of POSITIONS) {
-    const taken = Object.values(room.players).map(p => p.pos);
-    if (!taken.includes(pos)) {
-      room.bots[pos] = { nick: BOT_NAMES[bi % BOT_NAMES.length], rating: 490 + Math.floor(Math.random() * 30) };
+  for (const slot of SLOTS) {
+    const taken = Object.values(room.players).map(p => p.slot);
+    if (!taken.includes(slot)) {
+      room.bots[slot] = {
+        nick: BOT_NAMES[bi % BOT_NAMES.length],
+        rating: 490 + Math.floor(Math.random() * 30)
+      };
       bi++;
     }
   }
 }
 
-function buildSlots(room) {
-  const slots = {};
-  for (const pos of POSITIONS) {
-    const player = Object.values(room.players).find(p => p.pos === pos);
-    if (player) slots[pos] = { nick: player.nick, rating: player.rating, isBot: false };
-    else if (room.bots[pos]) slots[pos] = { nick: room.bots[pos].nick, rating: room.bots[pos].rating, isBot: true };
+// Будуємо інфо про всіх гравців для клієнта
+function buildPlayers(room) {
+  const result = {};
+  for (const slot of SLOTS) {
+    const player = Object.values(room.players).find(p => p.slot === slot);
+    if (player) {
+      result[slot] = { nick: player.nick, rating: player.rating, isBot: false };
+    } else if (room.bots[slot]) {
+      result[slot] = { nick: room.bots[slot].nick, rating: room.bots[slot].rating, isBot: true };
+    }
   }
-  return slots;
+  return result;
 }
 
 function broadcastLobby(room) {
-  io.to(room.id).emit('lobby:update', { slots: buildSlots(room) });
+  io.to(room.id).emit('lobby:update', { players: buildPlayers(room) });
 }
 
-function activePlayers(room) {
-  return POSITIONS.filter(p => !room.game.eliminated[p]);
+function activeSlots(room) {
+  return SLOTS.filter(s => !room.game.eliminated[s]);
 }
 
 function startCountdown(room) {
-  // Зупиняємо попередній таймер якщо був
   if (room.countdownTimer) {
     clearInterval(room.countdownTimer);
     room.countdownTimer = null;
   }
-
   room.status = 'countdown';
   let tl = 10;
   io.to(room.id).emit('mm:countdown', { timeLeft: tl });
-
   room.countdownTimer = setInterval(() => {
     tl--;
     io.to(room.id).emit('mm:countdown', { timeLeft: tl });
@@ -107,75 +112,70 @@ function startCountdown(room) {
 }
 
 io.on('connection', (socket) => {
-  let myRoom = null, myPos = null;
+  let myRoom = null, mySlot = null;
 
   socket.on('mm:join', ({ nick, rating, uid }) => {
     const room = findOrCreateRoom();
     myRoom = room;
-    myPos = getAvailablePos(room);
-    if (!myPos) { socket.emit('mm:error', 'Кімната повна'); return; }
+    mySlot = getAvailableSlot(room);
+    if (mySlot === undefined) { socket.emit('mm:error', 'Кімната повна'); return; }
 
-    room.players[socket.id] = { pos: myPos, nick, rating, uid };
+    room.players[socket.id] = { slot: mySlot, nick, rating, uid };
     socket.join(room.id);
-    socket.emit('mm:joined', { roomId: room.id, pos: myPos });
+
+    // Повідомляємо гравця його slot і всіх інших
+    socket.emit('mm:joined', { roomId: room.id, mySlot });
     broadcastLobby(room);
 
-    const playerCount = Object.keys(room.players).length;
-    console.log(`Room ${room.id}: ${playerCount} player(s)`);
+    const count = Object.keys(room.players).length;
 
-    if (playerCount === 1) {
-      // Перший гравець — просто чекаємо, таймер не запускаємо
+    if (count === 1) {
       room.status = 'waiting';
-      socket.emit('mm:waiting', { message: 'Чекаємо суперників...' });
-    } else if (playerCount >= 4) {
-      // Повна кімната — старт одразу
-      if (room.countdownTimer) {
-        clearInterval(room.countdownTimer);
-        room.countdownTimer = null;
-      }
+      socket.emit('mm:waiting', {});
+    } else if (count >= 4) {
+      if (room.countdownTimer) { clearInterval(room.countdownTimer); room.countdownTimer = null; }
       startGame(room);
     } else {
-      // 2-3 гравці — скидаємо і запускаємо таймер
       startCountdown(room);
     }
   });
 
-  // Позиція ракетки — транслюємо іншим
-  socket.on('player:paddle', ({ pos, x, energy, fieldActive }) => {
-    if (!myRoom || !myRoom.game.started) return;
-    myRoom.game.paddles[pos] = x;
-    myRoom.game.energy[pos] = energy;
-    myRoom.game.fields[pos] = fieldActive;
-    socket.to(myRoom.id).emit('paddle:update', { pos, x, energy, fieldActive });
+  // Гравець надсилає свою позицію як percent (0-1)
+  socket.on('player:paddle', ({ percent, energy, fieldActive }) => {
+    if (!myRoom || !myRoom.game.started || mySlot === null) return;
+    myRoom.game.paddles[mySlot] = percent;
+    myRoom.game.energy[mySlot] = energy;
+    myRoom.game.fields[mySlot] = fieldActive;
+    // Транслюємо іншим
+    socket.to(myRoom.id).emit('paddle:update', {
+      slot: mySlot, percent, energy, fieldActive
+    });
   });
 
-  // Гол — підтверджуємо і розсилаємо
-  socket.on('goal:report', ({ pos }) => {
+  // Гол
+  socket.on('goal:report', ({ slot }) => {
     if (!myRoom || !myRoom.game.started) return;
-    if (myRoom.game.eliminated[pos]) return;
-
+    if (myRoom.game.eliminated[slot]) return;
     const g = myRoom.game;
-    g.scores[pos]++;
-    g.lives[pos]--;
-
+    g.scores[slot]++;
+    g.lives[slot]--;
     io.to(myRoom.id).emit('goal:confirmed', {
-      pos,
+      slot,
       lives: { ...g.lives },
       scores: { ...g.scores },
     });
-
-    if (g.lives[pos] <= 0) {
-      g.eliminated[pos] = true;
-      io.to(myRoom.id).emit('player:eliminated', { pos });
-      const active = activePlayers(myRoom);
+    if (g.lives[slot] <= 0) {
+      g.eliminated[slot] = true;
+      io.to(myRoom.id).emit('player:eliminated', { slot });
+      const active = activeSlots(myRoom);
       if (active.length === 1) endGame(myRoom, active[0]);
     }
   });
 
-  // Синхронізація м'яча від хоста
+  // Синхронізація м'яча (хост = slot 0)
   socket.on('ball:spawn', ({ vx, vy }) => {
-    if (!myRoom || !myRoom.game.started) return;
-    socket.to(myRoom.id).emit('ball:synced', { vx, vy, x: 260, y: 260 });
+    if (!myRoom || !myRoom.game.started || mySlot !== 0) return;
+    socket.to(myRoom.id).emit('ball:synced', { vx, vy });
   });
 
   socket.on('mm:cancel', () => leave());
@@ -185,34 +185,22 @@ io.on('connection', (socket) => {
     if (!myRoom) return;
     delete myRoom.players[socket.id];
     socket.leave(myRoom.id);
-
-    const playerCount = Object.keys(myRoom.players).length;
-
-    if (playerCount === 0) {
-      // Всі вийшли — закриваємо кімнату
+    const count = Object.keys(myRoom.players).length;
+    if (count === 0) {
       if (myRoom.countdownTimer) clearInterval(myRoom.countdownTimer);
       rooms.delete(myRoom.id);
-      console.log(`Room ${myRoom.id} deleted`);
     } else {
       broadcastLobby(myRoom);
-
-      if (myRoom.game.started && myPos) {
-        // Під час гри — замінюємо ботом
-        myRoom.bots[myPos] = { nick: BOT_NAMES[0], rating: 500 };
-        io.to(myRoom.id).emit('player:left', { pos: myPos });
-      } else if (myRoom.status === 'countdown' && playerCount === 1) {
-        // Залишився один — зупиняємо таймер
-        if (myRoom.countdownTimer) {
-          clearInterval(myRoom.countdownTimer);
-          myRoom.countdownTimer = null;
-        }
+      if (myRoom.game.started && mySlot !== null) {
+        myRoom.bots[mySlot] = { nick: BOT_NAMES[0], rating: 500 };
+        io.to(myRoom.id).emit('player:left', { slot: mySlot });
+      } else if (myRoom.status === 'countdown' && count === 1) {
+        if (myRoom.countdownTimer) { clearInterval(myRoom.countdownTimer); myRoom.countdownTimer = null; }
         myRoom.status = 'waiting';
-        io.to(myRoom.id).emit('mm:waiting', { message: 'Суперник відключився. Чекаємо...' });
+        io.to(myRoom.id).emit('mm:waiting', {});
       }
     }
-
-    myRoom = null;
-    myPos = null;
+    myRoom = null; mySlot = null;
   }
 });
 
@@ -220,19 +208,24 @@ function startGame(room) {
   room.status = 'playing';
   fillBots(room);
   room.game.started = true;
-  const a = (Math.random() * 0.7 + 0.15) * Math.PI * (Math.random() < 0.5 ? 1 : -1) + (Math.random() < 0.5 ? 0 : Math.PI);
-  const vx = Math.cos(a) * 4, vy = Math.sin(a) * 4;
-  console.log(`Game started in room ${room.id} with ${Object.keys(room.players).length} players`);
+  // Генеруємо початковий вектор м'яча
+  let vx, vy, att = 0;
+  do {
+    const a = (Math.random() * 0.7 + 0.15) * Math.PI * (Math.random() < 0.5 ? 1 : -1) + (Math.random() < 0.5 ? 0 : Math.PI);
+    vx = Math.cos(a) * 4; vy = Math.sin(a) * 4; att++;
+  } while ((Math.abs(vx) < 1.8 || Math.abs(vy) < 1.8) && att < 30);
+
   io.to(room.id).emit('game:start', {
-    slots: buildSlots(room),
-    ball: { x: 260, y: 260, vx, vy }
+    players: buildPlayers(room),
+    ball: { vx, vy }
   });
+  console.log(`Game started: ${room.id}, ${Object.keys(room.players).length} real players`);
 }
 
-function endGame(room, winner) {
-  room.game.winner = winner;
+function endGame(room, winnerSlot) {
+  room.game.winner = winnerSlot;
   room.status = 'finished';
-  io.to(room.id).emit('game:over', { winner, slots: buildSlots(room) });
+  io.to(room.id).emit('game:over', { winnerSlot, players: buildPlayers(room) });
 }
 
 httpServer.listen(PORT, () => console.log(`Server on port ${PORT}`));
