@@ -24,6 +24,7 @@ const FDR = 380, BMULT = 1.55, FR = 36, RD = 1500;
 const PS = 3.375; // paddle speed px/tick (75% сповільнення)
 
 const SLOTS = [0, 1, 2, 3];
+const SLOT_VIEW = ['bottom', 'top', 'left', 'right'];
 const BOT_NAMES = ['ZEPHYR', 'GLITCH', 'NOVA', 'STORM', 'BLAZE', 'PIXEL'];
 
 const CS = [
