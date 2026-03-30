@@ -28,15 +28,15 @@ const FUEL_REGEN = 0.15 / 60;   // відновлення палива за ті
 const SLOTS = [0, 1, 2, 3];
 const BOT_NAMES = ['ZEPHYR', 'GLITCH', 'NOVA', 'STORM', 'BLAZE', 'PIXEL'];
 
-// Кути — випуклі чверті кіл (опуклі всередину поля)
-// Центри кіл ЗОВНІ кутів, м'яч відбивається коли занадто близько до кута
+// Кути опуклі назовні. Центри ВСЕРЕДИНІ кутів.
+// М'яч відбивається коли dist(ball,center) < CORNER_R + BR
+const CORNER_R = C;
 const CORNER_CIRCLES = [
-  { cx: C,   cy: C,   nx:  1, ny:  1 }, // верхній лівий
-  { cx: W-C, cy: C,   nx: -1, ny:  1 }, // верхній правий
-  { cx: C,   cy: H-C, nx:  1, ny: -1 }, // нижній лівий
-  { cx: W-C, cy: H-C, nx: -1, ny: -1 }, // нижній правий
+  { cx: C,   cy: C   },
+  { cx: W-C, cy: C   },
+  { cx: C,   cy: H-C },
+  { cx: W-C, cy: H-C },
 ];
-const CORNER_R = C; // радіус заокруглення
 
 // ── VIEW POSITIONS (slot 0 = bottom, slot 1 = top, slot 2 = left, slot 3 = right) ──
 // Це абсолютні позиції на полі — НЕ залежать від перспективи гравця
@@ -116,133 +116,46 @@ function cPt(px, py, ax, ay, bx, by) {
 }
 
 function resolveChamfers(gs) {
-  // Випуклі кути — відбиваємо від чвертей кіл
-  // М'яч не може зайти в зону кута (де x<C та y<C одночасно тощо)
-  let hit = false;
-  for (const corner of CORNER_CIRCLES) {
-    const dx = gs.ball.x - corner.cx;
-    const dy = gs.ball.y - corner.cy;
-    // М'яч в зоні кута якщо він з боку кута (знак збігається)
-    if (dx*corner.nx > 0 || dy*corner.ny > 0) continue;
-    const dist = Math.hypot(dx, dy);
-    // Відбиваємо якщо м'яч ближче ніж CORNER_R до центру кола
-    if (dist < CORNER_R - BR) {
-      // Нормаль — від центру до м'яча (відштовхуємо всередину поля)
-      let nx = dx, ny = dy;
-      const l = Math.hypot(nx, ny);
-      if (l < 0.001) { nx = corner.nx; ny = corner.ny; }
-      else { nx /= l; ny /= l; }
-      // Відбиття
-      const dot = gs.ball.vx*nx + gs.ball.vy*ny;
-      if (dot < 0) {
-        gs.ball.vx -= 2*dot*nx;
-        gs.ball.vy -= 2*dot*ny;
-      }
-      // Виштовхуємо м'яч на поверхню кола
-      const push = CORNER_R - BR - dist + 1;
-      gs.ball.x += nx*push;
-      gs.ball.y += ny*push;
-      const spd = Math.hypot(gs.ball.vx, gs.ball.vy);
-      if (spd > SMAX) { gs.ball.vx = gs.ball.vx/spd*SMAX; gs.ball.vy = gs.ball.vy/spd*SMAX; }
-      hit = true;
+  let hit=false;
+  for(const corner of CORNER_CIRCLES){
+    const bx=gs.ball.x,by=gs.ball.y;
+    const inX=corner.cx===C?bx<C:bx>W-C;
+    const inY=corner.cy===C?by<C:by>H-C;
+    if(!inX||!inY)continue;
+    const dx=bx-corner.cx,dy=by-corner.cy;
+    const dist=Math.hypot(dx,dy);
+    if(dist<CORNER_R+BR){
+      const l=dist<0.001?1:dist;
+      const nx=dx/l,ny=dy/l;
+      const dot=gs.ball.vx*nx+gs.ball.vy*ny;
+      if(dot<0){gs.ball.vx-=2*dot*nx;gs.ball.vy-=2*dot*ny;}
+      gs.ball.x=corner.cx+nx*(CORNER_R+BR+1);
+      gs.ball.y=corner.cy+ny*(CORNER_R+BR+1);
+      const spd=Math.hypot(gs.ball.vx,gs.ball.vy);
+      if(spd>SMAX){gs.ball.vx=gs.ball.vx/spd*SMAX;gs.ball.vy=gs.ball.vy/spd*SMAX;}
+      hit=true;
     }
   }
   return hit;
 }
 
 function clampBall(gs) {
-  // Додаткова перевірка — м'яч не виходить за межі кутових кіл
-  for (const corner of CORNER_CIRCLES) {
-    const dx = gs.ball.x - corner.cx;
-    const dy = gs.ball.y - corner.cy;
-    if (dx*corner.nx > 0 || dy*corner.ny > 0) continue;
-    const dist = Math.hypot(dx, dy);
-    if (dist < CORNER_R - BR - 2) {
-      const l = dist < 0.001 ? 1 : dist;
-      gs.ball.x = corner.cx + (dx/l)*(CORNER_R - BR - 1);
-      gs.ball.y = corner.cy + (dy/l)*(CORNER_R - BR - 1);
+  for(const corner of CORNER_CIRCLES){
+    const bx=gs.ball.x,by=gs.ball.y;
+    const inX=corner.cx===C?bx<C:bx>W-C;
+    const inY=corner.cy===C?by<C:by>H-C;
+    if(!inX||!inY)continue;
+    const dx=bx-corner.cx,dy=by-corner.cy;
+    const dist=Math.hypot(dx,dy);
+    if(dist<CORNER_R){
+      const l=dist<0.001?1:dist;
+      gs.ball.x=corner.cx+(dx/l)*(CORNER_R+BR+1);
+      gs.ball.y=corner.cy+(dy/l)*(CORNER_R+BR+1);
+      const nx=dx/l,ny=dy/l;
+      const dot=gs.ball.vx*nx+gs.ball.vy*ny;
+      if(dot<0){gs.ball.vx-=2*dot*nx;gs.ball.vy-=2*dot*ny;}
     }
   }
-}
-
-function hitRect(ball, p) {
-  return ball.x+BR>p.x && ball.x-BR<p.x+p.w && ball.y+BR>p.y && ball.y-BR<p.y+p.h;
-}
-
-function addSpin(gs, p) {
-  if (p.axis === 'x') { const r = (gs.ball.x-(p.x+p.w/2))/(p.w/2); gs.ball.vx += r*2.5; }
-  else { const r = (gs.ball.y-(p.y+p.h/2))/(p.h/2); gs.ball.vy += r*2.5; }
-  const sp = Math.hypot(gs.ball.vx, gs.ball.vy);
-  const ns = Math.min(sp*1.04, SMAX*0.75);
-  gs.ball.vx = gs.ball.vx/sp*ns; gs.ball.vy = gs.ball.vy/sp*ns;
-}
-
-function applyFF(gs, slot) {
-  const f = gs.fields[slot];
-  if (!f.active) return false;
-  const p = slotToPaddle(slot, gs.paddles[slot]);
-  const fcx = p.x+p.w/2, fcy = p.y+p.h/2;
-  const dx = gs.ball.x-fcx, dy = gs.ball.y-fcy;
-  const dist = Math.hypot(dx, dy);
-  const FF_RADIUS = FR * 1.3; // +30% дистанція
-  if (dist > FF_RADIUS+BR) return false;
-
-  const view = SLOT_VIEW[slot];
-  const isHoriz = view==='top' || view==='bottom';
-
-  // Визначаємо позицію м'яча відносно центру ракетки вздовж її осі
-  const relPos = isHoriz ? (gs.ball.x - fcx) : (gs.ball.y - fcy);
-  const halfPaddle = isHoriz ? p.w/2 : p.h/2;
-  const relPct = relPos / halfPaddle; // -1 = ліво, 0 = центр, +1 = право
-
-  let outVx = gs.ball.vx;
-  let outVy = gs.ball.vy;
-
-  if (dist < FF_RADIUS * 0.5) {
-    // М'яч ВСЕРЕДИНІ поля — відштовхуємо вперед + вліво або вправо
-    // "Вперед" = від ракетки (нормаль стіни)
-    let fwdX = 0, fwdY = 0;
-    if (view==='bottom') fwdY = -1;
-    else if (view==='top') fwdY = 1;
-    else if (view==='left') fwdX = 1;
-    else fwdX = -1;
-
-    // Бічна складова залежить від позиції м'яча на ракетці
-    const sideForce = relPct * 0.7; // -0.7..+0.7
-    let sideX = isHoriz ? sideForce : 0;
-    let sideY = isHoriz ? 0 : sideForce;
-
-    // Нормалізуємо напрямок і задаємо швидкість
-    const dirX = fwdX + sideX;
-    const dirY = fwdY + sideY;
-    const len = Math.hypot(dirX, dirY);
-    const speed = Math.min(Math.hypot(gs.ball.vx,gs.ball.vy)*BMULT, SMAX);
-    outVx = (dirX/len)*speed;
-    outVy = (dirY/len)*speed;
-  } else {
-    // М'яч на краю поля — звичайне відбиття від поверхні поля
-    const nx = dist > 0.001 ? dx/dist : 0;
-    const ny = dist > 0.001 ? dy/dist : 1;
-    const dot = gs.ball.vx*nx+gs.ball.vy*ny;
-    outVx = gs.ball.vx - 2*dot*nx;
-    outVy = gs.ball.vy - 2*dot*ny;
-    const sp = Math.hypot(outVx, outVy);
-    if (sp > 0.001) {
-      const ns = Math.min(sp*BMULT, SMAX);
-      outVx = outVx/sp*ns;
-      outVy = outVy/sp*ns;
-    }
-  }
-
-  gs.ball.vx = outVx;
-  gs.ball.vy = outVy;
-  // Виштовхуємо м'яч за межу поля
-  const nx2 = dist > 0.001 ? dx/dist : (isHoriz?0:1);
-  const ny2 = dist > 0.001 ? dy/dist : (isHoriz?1:0);
-  gs.ball.x = fcx + nx2*(FF_RADIUS+BR+2);
-  gs.ball.y = fcy + ny2*(FF_RADIUS+BR+2);
-  f.active = false; f.t = 0;
-  return true;
 }
 
 function predBall(gs, axis, wp) {
