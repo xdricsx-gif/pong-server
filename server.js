@@ -17,23 +17,26 @@ const TICK_RATE = 60;
 const TICK_MS = 1000 / TICK_RATE;
 
 // ── КОНСТАНТИ (мають збігатись з клієнтом) ──
-const W = 520, H = 520, BR = 8, SMAX = 6.5, C = 88;
+const W = 520, H = 520, BR = 8, SMAX = 4.875, C = 88;
 const PL = 54, PLV = 54, PTH = 16, PTV = 16;
 const ML = 10, EPU = 1 / 3, ECR = 1 / 10000;
 const FDR = 380, BMULT = 1.55, FR = 36, RD = 2000;
-const PS = 4.5; // paddle speed px/tick (50% від оригінального)
+const PS = 3.375; // paddle speed px/tick (75% сповільнення)
 const FUEL_DRAIN = 0.15 / 60;   // витрата палива за тік руху (15% за секунду)
 const FUEL_REGEN = 0.15 / 60;   // відновлення палива за тік без руху
 
 const SLOTS = [0, 1, 2, 3];
 const BOT_NAMES = ['ZEPHYR', 'GLITCH', 'NOVA', 'STORM', 'BLAZE', 'PIXEL'];
 
-const CS = [
-  { ax: 0,   ay: C,   bx: C,   by: 0,   nx:  1/Math.SQRT2, ny:  1/Math.SQRT2 },
-  { ax: W-C, ay: 0,   bx: W,   by: C,   nx: -1/Math.SQRT2, ny:  1/Math.SQRT2 },
-  { ax: 0,   ay: H-C, bx: C,   by: H,   nx:  1/Math.SQRT2, ny: -1/Math.SQRT2 },
-  { ax: W-C, ay: H,   bx: W,   by: H-C, nx: -1/Math.SQRT2, ny: -1/Math.SQRT2 },
+// Кути — випуклі чверті кіл (опуклі всередину поля)
+// Центри кіл ЗОВНІ кутів, м'яч відбивається коли занадто близько до кута
+const CORNER_CIRCLES = [
+  { cx: C,   cy: C,   nx:  1, ny:  1 }, // верхній лівий
+  { cx: W-C, cy: C,   nx: -1, ny:  1 }, // верхній правий
+  { cx: C,   cy: H-C, nx:  1, ny: -1 }, // нижній лівий
+  { cx: W-C, cy: H-C, nx: -1, ny: -1 }, // нижній правий
 ];
+const CORNER_R = C; // радіус заокруглення
 
 // ── VIEW POSITIONS (slot 0 = bottom, slot 1 = top, slot 2 = left, slot 3 = right) ──
 // Це абсолютні позиції на полі — НЕ залежать від перспективи гравця
@@ -113,18 +116,32 @@ function cPt(px, py, ax, ay, bx, by) {
 }
 
 function resolveChamfers(gs) {
+  // Випуклі кути — відбиваємо від чвертей кіл
+  // М'яч не може зайти в зону кута (де x<C та y<C одночасно тощо)
   let hit = false;
-  for (const s of CS) {
-    const { cx, cy } = cPt(gs.ball.x, gs.ball.y, s.ax, s.ay, s.bx, s.by);
-    const d = Math.hypot(gs.ball.x-cx, gs.ball.y-cy);
-    if (d < BR+1) {
-      let nx = gs.ball.x-cx, ny = gs.ball.y-cy;
+  for (const corner of CORNER_CIRCLES) {
+    const dx = gs.ball.x - corner.cx;
+    const dy = gs.ball.y - corner.cy;
+    // М'яч в зоні кута якщо він з боку кута (знак збігається)
+    if (dx*corner.nx > 0 || dy*corner.ny > 0) continue;
+    const dist = Math.hypot(dx, dy);
+    // Відбиваємо якщо м'яч ближче ніж CORNER_R до центру кола
+    if (dist < CORNER_R - BR) {
+      // Нормаль — від центру до м'яча (відштовхуємо всередину поля)
+      let nx = dx, ny = dy;
       const l = Math.hypot(nx, ny);
-      if (l < 0.001) { nx = s.nx; ny = s.ny; } else { nx /= l; ny /= l; }
-      if (nx*s.nx+ny*s.ny < 0) { nx = -nx; ny = -ny; }
-      const dot = gs.ball.vx*nx+gs.ball.vy*ny;
-      if (dot < 0) { gs.ball.vx -= 2*dot*nx; gs.ball.vy -= 2*dot*ny; }
-      gs.ball.x += nx*(BR+1-d); gs.ball.y += ny*(BR+1-d);
+      if (l < 0.001) { nx = corner.nx; ny = corner.ny; }
+      else { nx /= l; ny /= l; }
+      // Відбиття
+      const dot = gs.ball.vx*nx + gs.ball.vy*ny;
+      if (dot < 0) {
+        gs.ball.vx -= 2*dot*nx;
+        gs.ball.vy -= 2*dot*ny;
+      }
+      // Виштовхуємо м'яч на поверхню кола
+      const push = CORNER_R - BR - dist + 1;
+      gs.ball.x += nx*push;
+      gs.ball.y += ny*push;
       const spd = Math.hypot(gs.ball.vx, gs.ball.vy);
       if (spd > SMAX) { gs.ball.vx = gs.ball.vx/spd*SMAX; gs.ball.vy = gs.ball.vy/spd*SMAX; }
       hit = true;
@@ -134,13 +151,16 @@ function resolveChamfers(gs) {
 }
 
 function clampBall(gs) {
-  for (const s of CS) {
-    const d = (gs.ball.x-s.ax)*s.nx+(gs.ball.y-s.ay)*s.ny;
-    if (d < -BR) {
-      const dv = gs.ball.vx*s.nx+gs.ball.vy*s.ny;
-      gs.ball.vx -= 2*dv*s.nx; gs.ball.vy -= 2*dv*s.ny;
-      const { cx, cy } = cPt(gs.ball.x, gs.ball.y, s.ax, s.ay, s.bx, s.by);
-      gs.ball.x = cx+s.nx*(BR+1); gs.ball.y = cy+s.ny*(BR+1);
+  // Додаткова перевірка — м'яч не виходить за межі кутових кіл
+  for (const corner of CORNER_CIRCLES) {
+    const dx = gs.ball.x - corner.cx;
+    const dy = gs.ball.y - corner.cy;
+    if (dx*corner.nx > 0 || dy*corner.ny > 0) continue;
+    const dist = Math.hypot(dx, dy);
+    if (dist < CORNER_R - BR - 2) {
+      const l = dist < 0.001 ? 1 : dist;
+      gs.ball.x = corner.cx + (dx/l)*(CORNER_R - BR - 1);
+      gs.ball.y = corner.cy + (dy/l)*(CORNER_R - BR - 1);
     }
   }
 }
@@ -164,15 +184,63 @@ function applyFF(gs, slot) {
   const fcx = p.x+p.w/2, fcy = p.y+p.h/2;
   const dx = gs.ball.x-fcx, dy = gs.ball.y-fcy;
   const dist = Math.hypot(dx, dy);
-  if (dist > FR+BR) return false;
-  const nx = dist > 0.001 ? dx/dist : 0;
-  const ny = dist > 0.001 ? dy/dist : 1;
-  const dot = gs.ball.vx*nx+gs.ball.vy*ny;
-  gs.ball.vx -= 2*dot*nx; gs.ball.vy -= 2*dot*ny;
-  const sp = Math.hypot(gs.ball.vx, gs.ball.vy);
-  const ns = Math.min(sp*BMULT, SMAX);
-  gs.ball.vx = gs.ball.vx/sp*ns; gs.ball.vy = gs.ball.vy/sp*ns;
-  gs.ball.x = fcx+nx*(FR+BR+2); gs.ball.y = fcy+ny*(FR+BR+2);
+  const FF_RADIUS = FR * 1.3; // +30% дистанція
+  if (dist > FF_RADIUS+BR) return false;
+
+  const view = SLOT_VIEW[slot];
+  const isHoriz = view==='top' || view==='bottom';
+
+  // Визначаємо позицію м'яча відносно центру ракетки вздовж її осі
+  const relPos = isHoriz ? (gs.ball.x - fcx) : (gs.ball.y - fcy);
+  const halfPaddle = isHoriz ? p.w/2 : p.h/2;
+  const relPct = relPos / halfPaddle; // -1 = ліво, 0 = центр, +1 = право
+
+  let outVx = gs.ball.vx;
+  let outVy = gs.ball.vy;
+
+  if (dist < FF_RADIUS * 0.5) {
+    // М'яч ВСЕРЕДИНІ поля — відштовхуємо вперед + вліво або вправо
+    // "Вперед" = від ракетки (нормаль стіни)
+    let fwdX = 0, fwdY = 0;
+    if (view==='bottom') fwdY = -1;
+    else if (view==='top') fwdY = 1;
+    else if (view==='left') fwdX = 1;
+    else fwdX = -1;
+
+    // Бічна складова залежить від позиції м'яча на ракетці
+    const sideForce = relPct * 0.7; // -0.7..+0.7
+    let sideX = isHoriz ? sideForce : 0;
+    let sideY = isHoriz ? 0 : sideForce;
+
+    // Нормалізуємо напрямок і задаємо швидкість
+    const dirX = fwdX + sideX;
+    const dirY = fwdY + sideY;
+    const len = Math.hypot(dirX, dirY);
+    const speed = Math.min(Math.hypot(gs.ball.vx,gs.ball.vy)*BMULT, SMAX);
+    outVx = (dirX/len)*speed;
+    outVy = (dirY/len)*speed;
+  } else {
+    // М'яч на краю поля — звичайне відбиття від поверхні поля
+    const nx = dist > 0.001 ? dx/dist : 0;
+    const ny = dist > 0.001 ? dy/dist : 1;
+    const dot = gs.ball.vx*nx+gs.ball.vy*ny;
+    outVx = gs.ball.vx - 2*dot*nx;
+    outVy = gs.ball.vy - 2*dot*ny;
+    const sp = Math.hypot(outVx, outVy);
+    if (sp > 0.001) {
+      const ns = Math.min(sp*BMULT, SMAX);
+      outVx = outVx/sp*ns;
+      outVy = outVy/sp*ns;
+    }
+  }
+
+  gs.ball.vx = outVx;
+  gs.ball.vy = outVy;
+  // Виштовхуємо м'яч за межу поля
+  const nx2 = dist > 0.001 ? dx/dist : (isHoriz?0:1);
+  const ny2 = dist > 0.001 ? dy/dist : (isHoriz?1:0);
+  gs.ball.x = fcx + nx2*(FF_RADIUS+BR+2);
+  gs.ball.y = fcy + ny2*(FF_RADIUS+BR+2);
   f.active = false; f.t = 0;
   return true;
 }
@@ -193,8 +261,8 @@ function spawnBall(gs) {
   let vx, vy, a = 0;
   do {
     const ang = (Math.random()*0.7+0.15)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
-    vx = Math.cos(ang)*(1.75+Math.random()*0.75);
-    vy = Math.sin(ang)*(1.75+Math.random()*0.75);
+    vx = Math.cos(ang)*(1.3+Math.random()*0.56);
+    vy = Math.sin(ang)*(1.3+Math.random()*0.56);
     a++;
   } while ((Math.abs(vx)<1.8||Math.abs(vy)<1.8) && a<30);
   gs.ball = { x: W/2, y: H/2, vx: 0, vy: 0 };
@@ -353,11 +421,11 @@ function tick(room) {
   };
 
   const bx=gs.ball.x, by=gs.ball.y;
-  // Slot 0=bottom, 1=top, 2=left, 3=right
-  if (by-BR<0   && bx>C && bx<W-C) { if (!goal(1)) gs.ball.vy= Math.abs(gs.ball.vy); }
-  else if (by+BR>H && bx>C && bx<W-C) { if (!goal(0)) gs.ball.vy=-Math.abs(gs.ball.vy); }
-  else if (bx-BR<0 && by>C && by<H-C) { if (!goal(2)) gs.ball.vx= Math.abs(gs.ball.vx); }
-  else if (bx+BR>W && by>C && by<H-C) { if (!goal(3)) gs.ball.vx=-Math.abs(gs.ball.vx); }
+  // Гол рахується тільки коли м'яч ПОВНІСТЮ зник за межею (центр + радіус)
+  if (by+BR<0   && bx>C && bx<W-C) { if (!goal(1)) gs.ball.vy= Math.abs(gs.ball.vy); }
+  else if (by-BR>H && bx>C && bx<W-C) { if (!goal(0)) gs.ball.vy=-Math.abs(gs.ball.vy); }
+  else if (bx+BR<0 && by>C && by<H-C) { if (!goal(2)) gs.ball.vx= Math.abs(gs.ball.vx); }
+  else if (bx-BR>W && by>C && by<H-C) { if (!goal(3)) gs.ball.vx=-Math.abs(gs.ball.vx); }
 
   broadcastState(room);
 }
