@@ -96,13 +96,11 @@ function predBall(gs, axis, wp) {
 }
 
 function spawnBall(gs) {
-  let vx, vy, a = 0;
-  do {
-    const ang = (Math.random()*0.7+0.15)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
-    vx = Math.cos(ang)*(1.3+Math.random()*0.56);
-    vy = Math.sin(ang)*(1.3+Math.random()*0.56);
-    a++;
-  } while ((Math.abs(vx)<1.8||Math.abs(vy)<1.8) && a<30);
+  // Гарантуємо що обидві складові вектора ненульові
+  const ang = (Math.random()*0.6+0.2)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
+  const spd = 2.5 + Math.random()*0.5; // фіксована швидкість 2.5-3.0
+  const vx = Math.cos(ang)*spd;
+  const vy = Math.sin(ang)*spd;
   gs.ball = { x: W/2, y: H/2, vx: 0, vy: 0 };
   gs.respawn = { active: true, timer: RD, vx, vy };
 }
@@ -178,17 +176,10 @@ function createGameState(room) {
     tick: 0,
   };
   // Використовуємо ту саму функцію що і для респауну
-  const _bv = (() => {
-    let vx,vy,a=0;
-    do{
-      const ang=(Math.random()*0.7+0.15)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
-      vx=Math.cos(ang)*(1.3+Math.random()*0.56);
-      vy=Math.sin(ang)*(1.3+Math.random()*0.56);
-      a++;
-    }while((Math.abs(vx)<0.8||Math.abs(vy)<0.8)&&a<30);
-    return{vx,vy};
-  })();
-  gs.respawn.vx = _bv.vx; gs.respawn.vy = _bv.vy;
+  const _ang = (Math.random()*0.6+0.2)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
+  const _spd = 2.5 + Math.random()*0.5;
+  gs.respawn.vx = Math.cos(_ang)*_spd;
+  gs.respawn.vy = Math.sin(_ang)*_spd;
   return gs;
 }
 
