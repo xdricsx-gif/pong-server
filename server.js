@@ -98,6 +98,61 @@ function spawnBall(gs) {
   gs.respawn = { active: true, timer: RD, vx, vy };
 }
 
+const rooms = new Map();
+
+function createRoom(id) {
+  return {
+    id,
+    players: {},
+    bots: {},
+    status: 'waiting',
+    countdownTimer: null,
+    tickInterval: null,
+    game: null,
+  };
+}
+
+function findOrCreateRoom() {
+  for (const [, r] of rooms) {
+    if ((r.status === 'waiting' || r.status === 'countdown') && Object.keys(r.players).length < 4)
+      return r;
+  }
+  const id = 'r_' + Math.random().toString(36).slice(2, 8);
+  const room = createRoom(id);
+  rooms.set(id, room);
+  return room;
+}
+
+function getAvailableSlot(room) {
+  const taken = Object.values(room.players).map(p => p.slot);
+  return SLOTS.find(s => !taken.includes(s));
+}
+
+function fillBots(room) {
+  room.bots = {};
+  let bi = 0;
+  const taken = Object.values(room.players).map(p => p.slot);
+  for (const s of SLOTS) {
+    if (!taken.includes(s)) {
+      room.bots[s] = { nick: BOT_NAMES[bi++ % BOT_NAMES.length], rating: 490 + Math.floor(Math.random()*30) };
+    }
+  }
+}
+
+function buildPlayers(room) {
+  const res = {};
+  for (const s of SLOTS) {
+    const p = Object.values(room.players).find(p => p.slot === s);
+    if (p) res[s] = { nick: p.nick, rating: p.rating, isBot: false };
+    else if (room.bots[s]) res[s] = { nick: room.bots[s].nick, rating: room.bots[s].rating, isBot: true };
+  }
+  return res;
+}
+
+function broadcastLobby(room) {
+  io.to(room.id).emit('lobby:update', { players: buildPlayers(room) });
+}
+
 function createGameState(room) {
   const gs = {
     ball: { x: W/2, y: H/2, vx: 0, vy: 0 },
