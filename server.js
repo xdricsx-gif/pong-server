@@ -20,7 +20,7 @@ const TICK_MS = 1000 / TICK_RATE;
 const W = 520, H = 520, BR = 8, SMAX = 4.875, C = 88;
 const PL = 54, PLV = 54, PTH = 16, PTV = 16;
 const ML = 10, EPU = 1 / 3, ECR = 1 / 10000;
-const FDR = 380, BMULT = 1.55, FR = 36, RD = 2000;
+const FDR = 380, BMULT = 1.55, FR = 36, RD = 1500;
 const PS = 3.375; // paddle speed px/tick (75% сповільнення)
 
 const SLOTS = [0, 1, 2, 3];
@@ -168,12 +168,18 @@ function createGameState(room) {
     winner: null,
     tick: 0,
   };
-  const { vx, vy } = (() => {
-    let vx, vy, a=0;
-    do { const ang=(Math.random()*0.7+0.15)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI); vx=Math.cos(ang)*4; vy=Math.sin(ang)*4; a++; } while((Math.abs(vx)<1.8||Math.abs(vy)<1.8)&&a<30);
-    return {vx,vy};
+  // Використовуємо ту саму функцію що і для респауну
+  const _bv = (() => {
+    let vx,vy,a=0;
+    do{
+      const ang=(Math.random()*0.7+0.15)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
+      vx=Math.cos(ang)*(1.3+Math.random()*0.56);
+      vy=Math.sin(ang)*(1.3+Math.random()*0.56);
+      a++;
+    }while((Math.abs(vx)<0.8||Math.abs(vy)<0.8)&&a<30);
+    return{vx,vy};
   })();
-  gs.respawn.vx = vx; gs.respawn.vy = vy;
+  gs.respawn.vx = _bv.vx; gs.respawn.vy = _bv.vy;
   return gs;
 }
 
