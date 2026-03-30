@@ -190,6 +190,7 @@ function tick(room) {
   const gs = room.game;
   if (!gs || gs.gameOver) return;
   gs.tick++;
+  try {
 
   // ── Енергія і поля ──
   for (const s of SLOTS) {
@@ -310,6 +311,9 @@ function tick(room) {
   else if (bx-BR>W && by>C && by<H-C) { if (!goal(3)) gs.ball.vx=-Math.abs(gs.ball.vx); }
 
   broadcastState(room);
+  } catch(e) {
+    console.error('TICK ERROR:', e.message, e.stack?.split('\n')[1]);
+  }
 }
 
 function broadcastState(room) {
