@@ -22,92 +22,18 @@ const PL = 54, PLV = 54, PTH = 16, PTV = 16;
 const ML = 10, EPU = 1 / 3, ECR = 1 / 10000;
 const FDR = 380, BMULT = 1.55, FR = 36, RD = 2000;
 const PS = 3.375; // paddle speed px/tick (75% сповільнення)
-const FUEL_DRAIN = 0.15 / 60;   // витрата палива за тік руху (15% за секунду)
-const FUEL_REGEN = 0.15 / 60;   // відновлення палива за тік без руху
 
 const SLOTS = [0, 1, 2, 3];
 const BOT_NAMES = ['ZEPHYR', 'GLITCH', 'NOVA', 'STORM', 'BLAZE', 'PIXEL'];
 
-// Кути опуклі назовні. Центри ВСЕРЕДИНІ кутів.
-// М'яч відбивається коли dist(ball,center) < CORNER_R + BR
-const CORNER_R = C;
-const CORNER_CIRCLES = [
-  { cx: C,   cy: C   },
-  { cx: W-C, cy: C   },
-  { cx: C,   cy: H-C },
-  { cx: W-C, cy: H-C },
+const CS = [
+  { ax: 0,   ay: C,   bx: C,   by: 0,   nx:  1/Math.SQRT2, ny:  1/Math.SQRT2 },
+  { ax: W-C, ay: 0,   bx: W,   by: C,   nx: -1/Math.SQRT2, ny:  1/Math.SQRT2 },
+  { ax: 0,   ay: H-C, bx: C,   by: H,   nx:  1/Math.SQRT2, ny: -1/Math.SQRT2 },
+  { ax: W-C, ay: H,   bx: W,   by: H-C, nx: -1/Math.SQRT2, ny: -1/Math.SQRT2 },
 ];
 
-// ── VIEW POSITIONS (slot 0 = bottom, slot 1 = top, slot 2 = left, slot 3 = right) ──
-// Це абсолютні позиції на полі — НЕ залежать від перспективи гравця
-const SLOT_VIEW = ['bottom', 'top', 'left', 'right'];
 
-function slotToPaddle(slot, x) {
-  // x = позиція центру ракетки вздовж стіни
-  const view = SLOT_VIEW[slot];
-  if (view === 'bottom') return { x: x - PL/2, y: H-PTH-2, w: PL, h: PTH, axis: 'x', min: C, max: W-C-PL };
-  if (view === 'top')    return { x: x - PL/2, y: 2,        w: PL, h: PTH, axis: 'x', min: C, max: W-C-PL };
-  if (view === 'left')   return { x: 2,         y: x - PLV/2, w: PTV, h: PLV, axis: 'y', min: C, max: H-C-PLV };
-  if (view === 'right')  return { x: W-PTV-2,   y: x - PLV/2, w: PTV, h: PLV, axis: 'y', min: C, max: H-C-PLV };
-}
-
-// ── ROOM ──
-const rooms = new Map();
-
-function createRoom(id) {
-  return {
-    id,
-    players: {},  // socketId -> { slot, nick, rating, uid, input: {left,right,boost} }
-    bots: {},     // slot -> { nick, rating }
-    status: 'waiting',
-    countdownTimer: null,
-    tickInterval: null,
-    game: null,
-  };
-}
-
-function findOrCreateRoom() {
-  for (const [, r] of rooms) {
-    if ((r.status === 'waiting' || r.status === 'countdown') && Object.keys(r.players).length < 4)
-      return r;
-  }
-  const id = 'r_' + Math.random().toString(36).slice(2, 8);
-  const room = createRoom(id);
-  rooms.set(id, room);
-  return room;
-}
-
-function getAvailableSlot(room) {
-  const taken = Object.values(room.players).map(p => p.slot);
-  return SLOTS.find(s => !taken.includes(s));
-}
-
-function fillBots(room) {
-  room.bots = {};
-  let bi = 0;
-  const taken = Object.values(room.players).map(p => p.slot);
-  for (const s of SLOTS) {
-    if (!taken.includes(s)) {
-      room.bots[s] = { nick: BOT_NAMES[bi++ % BOT_NAMES.length], rating: 490 + Math.floor(Math.random()*30) };
-    }
-  }
-}
-
-function buildPlayers(room) {
-  const res = {};
-  for (const s of SLOTS) {
-    const p = Object.values(room.players).find(p => p.slot === s);
-    if (p) res[s] = { nick: p.nick, rating: p.rating, isBot: false };
-    else if (room.bots[s]) res[s] = { nick: room.bots[s].nick, rating: room.bots[s].rating, isBot: true };
-  }
-  return res;
-}
-
-function broadcastLobby(room) {
-  io.to(room.id).emit('lobby:update', { players: buildPlayers(room) });
-}
-
-// ── PHYSICS ──
 function cPt(px, py, ax, ay, bx, by) {
   const dx = bx-ax, dy = by-ay, l2 = dx*dx+dy*dy;
   if (!l2) return { cx: ax, cy: ay };
@@ -117,20 +43,17 @@ function cPt(px, py, ax, ay, bx, by) {
 
 function resolveChamfers(gs) {
   let hit=false;
-  for(const corner of CORNER_CIRCLES){
-    const bx=gs.ball.x,by=gs.ball.y;
-    const inX=corner.cx===C?bx<C:bx>W-C;
-    const inY=corner.cy===C?by<C:by>H-C;
-    if(!inX||!inY)continue;
-    const dx=bx-corner.cx,dy=by-corner.cy;
-    const dist=Math.hypot(dx,dy);
-    if(dist<CORNER_R+BR){
-      const l=dist<0.001?1:dist;
-      const nx=dx/l,ny=dy/l;
+  for(const s of CS){
+    const{cx,cy}=cPt(gs.ball.x,gs.ball.y,s.ax,s.ay,s.bx,s.by);
+    const d=Math.hypot(gs.ball.x-cx,gs.ball.y-cy);
+    if(d<BR+1){
+      let nx=gs.ball.x-cx,ny=gs.ball.y-cy;
+      const l=Math.hypot(nx,ny);
+      if(l<0.001){nx=s.nx;ny=s.ny;}else{nx/=l;ny/=l;}
+      if(nx*s.nx+ny*s.ny<0){nx=-nx;ny=-ny;}
       const dot=gs.ball.vx*nx+gs.ball.vy*ny;
       if(dot<0){gs.ball.vx-=2*dot*nx;gs.ball.vy-=2*dot*ny;}
-      gs.ball.x=corner.cx+nx*(CORNER_R+BR+1);
-      gs.ball.y=corner.cy+ny*(CORNER_R+BR+1);
+      gs.ball.x+=nx*(BR+1-d);gs.ball.y+=ny*(BR+1-d);
       const spd=Math.hypot(gs.ball.vx,gs.ball.vy);
       if(spd>SMAX){gs.ball.vx=gs.ball.vx/spd*SMAX;gs.ball.vy=gs.ball.vy/spd*SMAX;}
       hit=true;
@@ -140,20 +63,13 @@ function resolveChamfers(gs) {
 }
 
 function clampBall(gs) {
-  for(const corner of CORNER_CIRCLES){
-    const bx=gs.ball.x,by=gs.ball.y;
-    const inX=corner.cx===C?bx<C:bx>W-C;
-    const inY=corner.cy===C?by<C:by>H-C;
-    if(!inX||!inY)continue;
-    const dx=bx-corner.cx,dy=by-corner.cy;
-    const dist=Math.hypot(dx,dy);
-    if(dist<CORNER_R){
-      const l=dist<0.001?1:dist;
-      gs.ball.x=corner.cx+(dx/l)*(CORNER_R+BR+1);
-      gs.ball.y=corner.cy+(dy/l)*(CORNER_R+BR+1);
-      const nx=dx/l,ny=dy/l;
-      const dot=gs.ball.vx*nx+gs.ball.vy*ny;
-      if(dot<0){gs.ball.vx-=2*dot*nx;gs.ball.vy-=2*dot*ny;}
+  for(const s of CS){
+    const d=(gs.ball.x-s.ax)*s.nx+(gs.ball.y-s.ay)*s.ny;
+    if(d<-BR){
+      const dv=gs.ball.vx*s.nx+gs.ball.vy*s.ny;
+      gs.ball.vx-=2*dv*s.nx;gs.ball.vy-=2*dv*s.ny;
+      const{cx,cy}=cPt(gs.ball.x,gs.ball.y,s.ax,s.ay,s.bx,s.by);
+      gs.ball.x=cx+s.nx*(BR+1);gs.ball.y=cy+s.ny*(BR+1);
     }
   }
 }
@@ -193,7 +109,6 @@ function createGameState(room) {
     fields: { 0:{active:false,t:0}, 1:{active:false,t:0}, 2:{active:false,t:0}, 3:{active:false,t:0} },
     eliminated: { 0: false, 1: false, 2: false, 3: false },
     botTargets: { 0: W/2, 1: W/2, 2: H/2, 3: H/2 },
-    fuel: { 0: 1, 1: 1, 2: 1, 3: 1 },
     gameOver: false,
     winner: null,
     tick: 0,
@@ -234,16 +149,8 @@ function tick(room) {
     const isHoriz = view === 'top' || view === 'bottom';
     const mn = isHoriz ? C+PL/2 : C+PLV/2;
     const mx = isHoriz ? W-C-PL/2 : H-C-PLV/2;
-    const moving = inp.left || inp.right;
-    if (moving && gs.fuel[s] > 0) {
-      // Рухаємось тільки якщо є паливо
-      if (inp.left)  gs.paddles[s] = Math.max(mn, gs.paddles[s] - PS);
-      if (inp.right) gs.paddles[s] = Math.min(mx, gs.paddles[s] + PS);
-      gs.fuel[s] = Math.max(0, gs.fuel[s] - FUEL_DRAIN);
-    } else if (!moving) {
-      // Відновлення палива коли не рухається
-      gs.fuel[s] = Math.min(1, gs.fuel[s] + FUEL_REGEN);
-    }
+    if (inp.left)  gs.paddles[s] = Math.max(mn, gs.paddles[s] - PS);
+    if (inp.right) gs.paddles[s] = Math.min(mx, gs.paddles[s] + PS);
     if (inp.boost && !gs.fields[s].active && gs.energy[s] >= EPU) {
       gs.fields[s].active = true; gs.fields[s].t = 0;
       gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
@@ -364,12 +271,6 @@ function broadcastState(room) {
       Math.round(gs.energy[1]*100),
       Math.round(gs.energy[2]*100),
       Math.round(gs.energy[3]*100),
-    ],
-    fu: [ // fuel 0-100
-      Math.round(gs.fuel[0]*100),
-      Math.round(gs.fuel[1]*100),
-      Math.round(gs.fuel[2]*100),
-      Math.round(gs.fuel[3]*100),
     ],
     f: [ // fields active
       gs.fields[0].active?1:0,
