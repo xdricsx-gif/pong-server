@@ -35,6 +35,14 @@ const CS = [
 ];
 
 
+function slotToPaddle(slot, cx) {
+  const view = SLOT_VIEW[slot];
+  if (view==='bottom') return {x:cx-PL/2, y:H-PTH-2, w:PL, h:PTH, axis:'x', min:C, max:W-C-PL};
+  if (view==='top')    return {x:cx-PL/2, y:2,        w:PL, h:PTH, axis:'x', min:C, max:W-C-PL};
+  if (view==='left')   return {x:2,        y:cx-PLV/2, w:PTV, h:PLV, axis:'y', min:C, max:H-C-PLV};
+  if (view==='right')  return {x:W-PTV-2,  y:cx-PLV/2, w:PTV, h:PLV, axis:'y', min:C, max:H-C-PLV};
+}
+
 function cPt(px, py, ax, ay, bx, by) {
   const dx = bx-ax, dy = by-ay, l2 = dx*dx+dy*dy;
   if (!l2) return { cx: ax, cy: ay };
