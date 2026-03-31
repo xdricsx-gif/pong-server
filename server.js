@@ -441,6 +441,13 @@ io.on('connection', (socket) => {
     const room = rooms.get(roomId);
     if (!room) { socket.emit('rejoin:fail', { reason: 'room_gone' }); return; }
 
+    // Перевіряємо що цей слот справді відключений (не зайнятий іншим гравцем)
+    const alreadyTaken = Object.values(room.players).some(p => p.slot === slot);
+    if (alreadyTaken) { socket.emit('rejoin:fail', { reason: 'slot_taken' }); return; }
+
+    // Очищаємо _disconnected запис
+    if (room._disconnected) delete room._disconnected[slot];
+
     // Кімната існує — відновлюємо гравця
     myRoom = room;
     mySlot = slot;
@@ -498,11 +505,10 @@ io.on('connection', (socket) => {
 
     if (room.status === 'playing' && slot !== null) {
       // Під час гри — замінюємо на бота і чекаємо реконект 30 сек
-      room.bots[slot] = {
-        nick: pinfo?.nick || BOT_NAMES[0],
-        rating: pinfo?.rating || 500,
-        uid: pinfo?.uid || null,
-      };
+      // НЕ ставимо бота — ракетка просто стоїть на місці до реконекту
+      // Зберігаємо uid для реконекту
+      room._disconnected = room._disconnected || {};
+      room._disconnected[slot] = { nick: pinfo?.nick, rating: pinfo?.rating, uid: pinfo?.uid };
       io.to(room.id).emit('player:left', { slot });
 
       // Якщо всі реальні гравці вийшли — таймер на видалення кімнати
