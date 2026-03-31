@@ -443,12 +443,9 @@ function broadcastState(room) {
       gs.fields[2].active ? Math.round(getFFRadius(gs.fields[2])) : 0,
       gs.fields[3].active ? Math.round(getFFRadius(gs.fields[3])) : 0,
     ],
-    el: [ // eliminated
-      gs.eliminated[0]?1:0,
-      gs.eliminated[1]?1:0,
-      gs.eliminated[2]?1:0,
-      gs.eliminated[3]?1:0,
-    ],
+    el: [gs.eliminated[0]?1:0,gs.eliminated[1]?1:0,gs.eliminated[2]?1:0,gs.eliminated[3]?1:0],
+    lv: [gs.lives[0],gs.lives[1],gs.lives[2],gs.lives[3]],
+    sc: [gs.scores[0],gs.scores[1],gs.scores[2],gs.scores[3]],
   });
 }
 
