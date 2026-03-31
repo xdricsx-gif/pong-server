@@ -259,7 +259,7 @@ function clampBallObj(ball) {
 function applyFFBall(gs, s, ball) {
   const f = gs.fields[s];
   if (!f || !f.active) return false;
-  const p = slotToPaddle(s, gs.paddles[s]);
+  const p = slotToPaddle(s, gs.paddles[s], gs, null);
   const fcx = p.x+p.w/2, fcy = p.y+p.h/2;
   const dx = ball.x-fcx, dy = ball.y-fcy;
   const dist = Math.hypot(dx,dy);
@@ -308,10 +308,14 @@ function tick(room) {
     const inp = player.input || {};
     const view = SLOT_VIEW[s];
     const isHoriz = view === 'top' || view === 'bottom';
-    const mn = isHoriz ? C+PL/2 : C+PLV/2;
-    const mx = isHoriz ? W-C-PL/2 : H-C-PLV/2;
-    if (inp.left)  gs.paddles[s] = Math.max(mn, gs.paddles[s] - PS);
-    if (inp.right) gs.paddles[s] = Math.min(mx, gs.paddles[s] + PS);
+    const pStats = player.paddleStats || {};
+    const pSpd = pStats.spd || PS;
+    const pW = pStats.w || PL;
+    const pHalf = isHoriz ? pW/2 : (pStats.w||PLV)/2;
+    const mn = isHoriz ? C+pHalf : C+pHalf;
+    const mx = isHoriz ? W-C-pHalf : H-C-pHalf;
+    if (inp.left)  gs.paddles[s] = Math.max(mn, gs.paddles[s] - pSpd);
+    if (inp.right) gs.paddles[s] = Math.min(mx, gs.paddles[s] + pSpd);
     if (inp.boost && !gs.fields[s].active && gs.energy[s] >= EPU) {
       gs.fields[s].active = true; gs.fields[s].t = 0; gs.fields[s].r = 0;
       gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
@@ -334,7 +338,7 @@ function tick(room) {
     if (Math.abs(diff) > 2) gs.paddles[s] = Math.max(mn, Math.min(mx, gs.paddles[s] + Math.sign(diff)*Math.min(3.5,Math.abs(diff))));
     // Бот активує поле
     if (!gs.fields[s].active && gs.energy[s] >= EPU) {
-      const p = slotToPaddle(s, gs.paddles[s]);
+      const p = slotToPaddle(s, gs.paddles[s], gs, room);
       const _b0 = gs.balls[0] || {x:W/2,y:H/2};
       const dist = isHoriz ? Math.abs(_b0.y-(p.y+p.h/2)) : Math.abs(_b0.x-(p.x+p.w/2));
       if (dist < 80 && Math.random() < 0.02) {
@@ -384,7 +388,7 @@ function tick(room) {
     let hit = false;
     for (const s of SLOTS) {
       if (gs.eliminated[s]) continue;
-      const p = slotToPaddle(s, gs.paddles[s]);
+      const p = slotToPaddle(s, gs.paddles[s], gs, room);
       if (hitRect(ball, p)) {
         const view = SLOT_VIEW[s];
         const speed = Math.hypot(ball.vx, ball.vy);
@@ -524,7 +528,7 @@ function startCountdown(room) {
 io.on('connection', (socket) => {
   let myRoom = null, mySlot = null;
 
-  socket.on('mm:join', ({ nick, rating, uid, wins, games }) => {
+  socket.on('mm:join', ({ nick, rating, uid, wins, games, paddleStats }) => {
     const room = findOrCreateRoom();
     myRoom = room;
     mySlot = getAvailableSlot(room);
@@ -539,7 +543,9 @@ io.on('connection', (socket) => {
       }
     }
 
-    room.players[socket.id] = { slot: mySlot, nick, rating, uid, wins: wins||0, games: games||0, input: {} };
+    room.players[socket.id] = { slot: mySlot, nick, rating, uid, wins: wins||0, games: games||0, input: {},
+      paddleStats: paddleStats || { spd:3.375, w:54, fr:54, bm:2.32 }
+    };
     socket.join(room.id);
     socket.emit('mm:joined', { mySlot, roomId: room.id });
     broadcastLobby(room);
