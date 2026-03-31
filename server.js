@@ -334,7 +334,8 @@ function tick(room) {
     // Бот активує поле
     if (!gs.fields[s].active && gs.energy[s] >= EPU) {
       const p = slotToPaddle(s, gs.paddles[s]);
-      const dist = isHoriz ? Math.abs(gs.ball.y-(p.y+p.h/2)) : Math.abs(gs.ball.x-(p.x+p.w/2));
+      const _b0 = gs.balls[0] || {x:W/2,y:H/2};
+      const dist = isHoriz ? Math.abs(_b0.y-(p.y+p.h/2)) : Math.abs(_b0.x-(p.x+p.w/2));
       if (dist < 80 && Math.random() < 0.02) {
         gs.fields[s].active = true; gs.fields[s].t = 0;
         gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
