@@ -445,6 +445,11 @@ io.on('connection', (socket) => {
     myRoom = room;
     mySlot = slot;
 
+    // Скасовуємо таймер видалення кімнати якщо він був
+    if (room._deleteTimer) {
+      clearTimeout(room._deleteTimer);
+      room._deleteTimer = null;
+    }
     // Замінюємо бота назад на гравця
     delete room.bots[slot];
     room.players[socket.id] = { slot, nick, rating, uid, input: {} };
@@ -482,27 +487,48 @@ io.on('connection', (socket) => {
 
   function leave() {
     if (!myRoom) return;
-    delete myRoom.players[socket.id];
-    socket.leave(myRoom.id);
-    const count = Object.keys(myRoom.players).length;
-    if (count === 0) {
-      if (myRoom.tickInterval) clearInterval(myRoom.tickInterval);
-      if (myRoom.countdownTimer) clearInterval(myRoom.countdownTimer);
-      rooms.delete(myRoom.id);
+    const room = myRoom;
+    const slot = mySlot;
+    const pinfo = room.players[socket.id];
+    delete room.players[socket.id];
+    socket.leave(room.id);
+    myRoom = null; mySlot = null;
+
+    const count = Object.keys(room.players).length;
+
+    if (room.status === 'playing' && slot !== null) {
+      // Під час гри — замінюємо на бота і чекаємо реконект 30 сек
+      room.bots[slot] = {
+        nick: pinfo?.nick || BOT_NAMES[0],
+        rating: pinfo?.rating || 500,
+        uid: pinfo?.uid || null,
+      };
+      io.to(room.id).emit('player:left', { slot });
+
+      // Якщо всі реальні гравці вийшли — таймер на видалення кімнати
+      if (count === 0) {
+        room._deleteTimer = setTimeout(() => {
+          if (Object.keys(room.players).length === 0) {
+            if (room.tickInterval) clearInterval(room.tickInterval);
+            if (room.countdownTimer) clearInterval(room.countdownTimer);
+            rooms.delete(room.id);
+            console.log(`Room ${room.id} deleted (no reconnect)`);
+          }
+        }, 30000); // 30 секунд на реконект
+      }
+    } else if (count === 0) {
+      // Не в грі і нікого немає — видаляємо одразу
+      if (room.tickInterval) clearInterval(room.tickInterval);
+      if (room.countdownTimer) clearInterval(room.countdownTimer);
+      rooms.delete(room.id);
     } else {
-      broadcastLobby(myRoom);
-      if (myRoom.status === 'playing' && mySlot !== null) {
-        // Зберігаємо інфо про відключеного гравця для реконекту
-        const pinfo = myRoom.players[socket.id];
-        myRoom.bots[mySlot] = { nick: pinfo?.nick || BOT_NAMES[0], rating: pinfo?.rating || 500, _disconnectedUid: pinfo?.uid, _disconnectedSlot: mySlot };
-        io.to(myRoom.id).emit('player:left', { slot: mySlot });
-      } else if (myRoom.status === 'countdown' && count === 1) {
-        if (myRoom.countdownTimer) { clearInterval(myRoom.countdownTimer); myRoom.countdownTimer = null; }
-        myRoom.status = 'waiting';
-        io.to(myRoom.id).emit('mm:waiting', {});
+      broadcastLobby(room);
+      if (room.status === 'countdown' && count === 1) {
+        if (room.countdownTimer) { clearInterval(room.countdownTimer); room.countdownTimer = null; }
+        room.status = 'waiting';
+        io.to(room.id).emit('mm:waiting', {});
       }
     }
-    myRoom = null; mySlot = null;
   }
 });
 
