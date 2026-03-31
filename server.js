@@ -343,7 +343,14 @@ function tick(room) {
     }
   }
 
-  // respawn handled above via gs.respawns[]
+  // ── Respawns → balls ──
+  for (let i = gs.respawns.length - 1; i >= 0; i--) {
+    gs.respawns[i].timer -= TICK_MS;
+    if (gs.respawns[i].timer <= 0) {
+      gs.balls.push({ x: W/2, y: H/2, vx: gs.respawns[i].vx, vy: gs.respawns[i].vy, id: Date.now()+i });
+      gs.respawns.splice(i, 1);
+    }
+  }
 
   const goal = (slot) => {
     if (gs.eliminated[slot]) return false;
