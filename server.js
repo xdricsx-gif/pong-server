@@ -423,7 +423,16 @@ io.on('connection', (socket) => {
     const room = findOrCreateRoom();
     myRoom = room;
     mySlot = getAvailableSlot(room);
-    if (mySlot === undefined) { socket.emit('mm:error', 'Кімната повна'); return; }
+    // Якщо вільних слотів немає але є боти — витісняємо бота
+    if (mySlot === undefined) {
+      const botSlot = SLOTS.find(s => room.bots[s] && !Object.values(room.players).some(p=>p.slot===s));
+      if (botSlot !== undefined) {
+        delete room.bots[botSlot];
+        mySlot = botSlot;
+      } else {
+        socket.emit('mm:error', 'Кімната повна'); return;
+      }
+    }
 
     room.players[socket.id] = { slot: mySlot, nick, rating, uid, input: {} };
     socket.join(room.id);
@@ -431,9 +440,20 @@ io.on('connection', (socket) => {
     broadcastLobby(room);
 
     const count = Object.keys(room.players).length;
-    if (count === 1) { room.status = 'waiting'; socket.emit('mm:waiting', {}); }
-    else if (count >= 4) { if (room.countdownTimer) { clearInterval(room.countdownTimer); room.countdownTimer = null; } startGame(room); }
-    else startCountdown(room);
+    if (count === 1) {
+      // Одразу заповнюємо вільні слоти ботами і запускаємо таймер
+      fillBots(room);
+      broadcastLobby(room);
+      startCountdown(room);
+    } else if (count >= 4) {
+      if (room.countdownTimer) { clearInterval(room.countdownTimer); room.countdownTimer = null; }
+      startGame(room);
+    } else {
+      // Ще один реальний гравець — оновлюємо лобі і скидаємо таймер
+      fillBots(room); // оновлюємо ботів (деяких могло витіснити)
+      broadcastLobby(room);
+      startCountdown(room); // скидаємо таймер
+    }
   });
 
   // Реконект — гравець повертається в кімнату
@@ -452,11 +472,9 @@ io.on('connection', (socket) => {
     myRoom = room;
     mySlot = slot;
 
-    // Скасовуємо таймер видалення кімнати якщо він був
-    if (room._deleteTimer) {
-      clearTimeout(room._deleteTimer);
-      room._deleteTimer = null;
-    }
+    // Скасовуємо таймер видалення кімнати
+    if (room._deleteTimer) { clearTimeout(room._deleteTimer); room._deleteTimer = null; }
+    if (room._disconnected) delete room._disconnected[slot];
     // Замінюємо бота назад на гравця
     delete room.bots[slot];
     room.players[socket.id] = { slot, nick, rating, uid, input: {} };
@@ -505,23 +523,23 @@ io.on('connection', (socket) => {
 
     if (room.status === 'playing' && slot !== null) {
       // Під час гри — замінюємо на бота і чекаємо реконект 30 сек
-      // НЕ ставимо бота — ракетка просто стоїть на місці до реконекту
-      // Зберігаємо uid для реконекту
+      // Нараховуємо штраф рейтингу за вихід (як за останнє місце)
+      io.to(room.id).emit('player:left', { slot, ratingDelta: -5 });
+
+      // Зберігаємо для реконекту
       room._disconnected = room._disconnected || {};
       room._disconnected[slot] = { nick: pinfo?.nick, rating: pinfo?.rating, uid: pinfo?.uid };
-      io.to(room.id).emit('player:left', { slot });
 
-      // Якщо всі реальні гравці вийшли — таймер на видалення кімнати
-      if (count === 0) {
-        room._deleteTimer = setTimeout(() => {
-          if (Object.keys(room.players).length === 0) {
-            if (room.tickInterval) clearInterval(room.tickInterval);
-            if (room.countdownTimer) clearInterval(room.countdownTimer);
-            rooms.delete(room.id);
-            console.log(`Room ${room.id} deleted (no reconnect)`);
-          }
-        }, 30000); // 30 секунд на реконект
-      }
+      // Таймер 30с — якщо не повернувся, видаляємо кімнату
+      if (room._deleteTimer) clearTimeout(room._deleteTimer);
+      room._deleteTimer = setTimeout(() => {
+        console.log(`Room ${room.id}: timeout, deleting`);
+        if (room.tickInterval) clearInterval(room.tickInterval);
+        if (room.countdownTimer) clearInterval(room.countdownTimer);
+        // Сповіщаємо всіх хто ще є
+        io.to(room.id).emit('room:closed');
+        rooms.delete(room.id);
+      }, 30000);
     } else if (count === 0) {
       // Не в грі і нікого немає — видаляємо одразу
       if (room.tickInterval) clearInterval(room.tickInterval);
