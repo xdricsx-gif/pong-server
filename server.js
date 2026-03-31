@@ -146,8 +146,8 @@ function buildPlayers(room) {
   const res = {};
   for (const s of SLOTS) {
     const p = Object.values(room.players).find(p => p.slot === s);
-    if (p) res[s] = { nick: p.nick, rating: p.rating, isBot: false };
-    else if (room.bots[s]) res[s] = { nick: room.bots[s].nick, rating: room.bots[s].rating, isBot: true };
+    if (p) res[s] = { nick: p.nick, rating: p.rating, isBot: false, wins: p.wins||0, games: p.games||0 };
+    else if (room.bots[s]) res[s] = { nick: room.bots[s].nick, rating: room.bots[s].rating, isBot: true, wins: 0, games: 0 };
   }
   return res;
 }
@@ -410,13 +410,17 @@ function tick(room) {
     let scored = false;
     const by = ball.y, bx2 = ball.x;
     if (by-BR < 0 && bx2 > C && bx2 < W-C) {
-      if (!goal(1)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true;
+      if (gs.eliminated[1]) { ball.vy = Math.abs(ball.vy); } // відбиваємо
+      else { if (!goal(1)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true; }
     } else if (by+BR > H && bx2 > C && bx2 < W-C) {
-      if (!goal(0)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true;
+      if (gs.eliminated[0]) { ball.vy = -Math.abs(ball.vy); }
+      else { if (!goal(0)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true; }
     } else if (bx2-BR < 0 && by > C && by < H-C) {
-      if (!goal(2)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true;
+      if (gs.eliminated[2]) { ball.vx = Math.abs(ball.vx); }
+      else { if (!goal(2)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true; }
     } else if (bx2+BR > W && by > C && by < H-C) {
-      if (!goal(3)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true;
+      if (gs.eliminated[3]) { ball.vx = -Math.abs(ball.vx); }
+      else { if (!goal(3)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true; }
     }
     if (scored && gs.gameOver) { broadcastState(room); return; }
   }
@@ -497,7 +501,7 @@ function startCountdown(room) {
 io.on('connection', (socket) => {
   let myRoom = null, mySlot = null;
 
-  socket.on('mm:join', ({ nick, rating, uid }) => {
+  socket.on('mm:join', ({ nick, rating, uid, wins, games }) => {
     const room = findOrCreateRoom();
     myRoom = room;
     mySlot = getAvailableSlot(room);
@@ -512,7 +516,7 @@ io.on('connection', (socket) => {
       }
     }
 
-    room.players[socket.id] = { slot: mySlot, nick, rating, uid, input: {} };
+    room.players[socket.id] = { slot: mySlot, nick, rating, uid, wins: wins||0, games: games||0, input: {} };
     socket.join(room.id);
     socket.emit('mm:joined', { mySlot, roomId: room.id });
     broadcastLobby(room);
