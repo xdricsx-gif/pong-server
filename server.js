@@ -20,7 +20,7 @@ const TICK_MS = 1000 / TICK_RATE;
 const W = 520, H = 520, BR = 8, SMAX = 4.875, C = 130;
 const PL = 54, PLV = 54, PTH = 16, PTV = 16;
 const ML = 10, EPU = 1 / 3, ECR = 1 / 10000;
-const FDR = 380, BMULT = 1.55, FR = 36, RD = 1500;
+const FDR = 380, BMULT = 2.32, FR = 54, RD = 2000;
 const PS = 3.375; // paddle speed px/tick (75% сповільнення)
 
 const SLOTS = [0, 1, 2, 3];
@@ -83,8 +83,8 @@ function clampBall(gs) {
   }
 }
 
-function predBall(gs, axis, wp) {
-  let bx=gs.ball.x,by=gs.ball.y,vx=gs.ball.vx,vy=gs.ball.vy;
+function predBall(ball, axis, wp) {
+  let bx=ball.x,by=ball.y,vx=ball.vx,vy=ball.vy;
   for (let i=0; i<300; i++) {
     bx+=vx; by+=vy;
     if(bx-BR<0){bx=BR;vx=Math.abs(vx);} if(bx+BR>W){bx=W-BR;vx=-Math.abs(vx);}
@@ -95,14 +95,10 @@ function predBall(gs, axis, wp) {
   return axis==='x'?bx:by;
 }
 
-function spawnBall(gs) {
-  // Гарантуємо що обидві складові вектора ненульові
-  const ang = (Math.random()*0.6+0.2)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
-  const spd = 2.5 + Math.random()*0.5; // фіксована швидкість 2.5-3.0
-  const vx = Math.cos(ang)*spd;
-  const vy = Math.sin(ang)*spd;
-  gs.ball = { x: W/2, y: H/2, vx: 0, vy: 0 };
-  gs.respawn = { active: true, timer: RD, vx, vy };
+function spawnBallQueued(gs) {
+  const ang=(Math.random()*0.6+0.2)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
+  const spd=2.5+Math.random()*0.5;
+  gs.respawns.push({ timer: RD, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd });
 }
 
 const rooms = new Map();
@@ -162,8 +158,8 @@ function broadcastLobby(room) {
 
 function createGameState(room) {
   const gs = {
-    ball: { x: W/2, y: H/2, vx: 0, vy: 0 },
-    respawn: { active: true, timer: RD, vx: 0, vy: 0 },
+    balls: [],       // активні м'ячі
+    respawns: [],    // черга респаунів [{timer, vx, vy}]
     paddles: { 0: W/2, 1: W/2, 2: H/2, 3: H/2 }, // центр ракетки
     lives: { 0: ML, 1: ML, 2: ML, 3: ML },
     scores: { 0: 0, 1: 0, 2: 0, 3: 0 },
@@ -176,10 +172,12 @@ function createGameState(room) {
     tick: 0,
   };
   // Використовуємо ту саму функцію що і для респауну
-  const _ang = (Math.random()*0.6+0.2)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
-  const _spd = 2.5 + Math.random()*0.5;
-  gs.respawn.vx = Math.cos(_ang)*_spd;
-  gs.respawn.vy = Math.sin(_ang)*_spd;
+  // Запускаємо 4 м'ячі одразу з невеликою затримкою між ними
+  for(let i=0;i<4;i++){
+    const ang=(Math.random()*0.6+0.2)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
+    const spd=2.5+Math.random()*0.5;
+    gs.respawns.push({ timer: i*600, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd });
+  }
   return gs;
 }
 
@@ -230,6 +228,58 @@ function applyFF(gs, s) {
   return true;
 }
 
+// Версії фізичних функцій для окремого ball об'єкта
+function resolveChamfersBall(ball) {
+  for(const s of CS){
+    const{cx,cy}=cPt(ball.x,ball.y,s.ax,s.ay,s.bx,s.by);
+    const d=Math.hypot(ball.x-cx,ball.y-cy);
+    if(d<BR+1){
+      let nx=ball.x-cx,ny=ball.y-cy;const l=Math.hypot(nx,ny);
+      if(l<0.001){nx=s.nx;ny=s.ny;}else{nx/=l;ny/=l;}
+      if(nx*s.nx+ny*s.ny<0){nx=-nx;ny=-ny;}
+      const dot=ball.vx*nx+ball.vy*ny;if(dot<0){ball.vx-=2*dot*nx;ball.vy-=2*dot*ny;}
+      ball.x+=nx*(BR+1-d);ball.y+=ny*(BR+1-d);
+      const spd=Math.hypot(ball.vx,ball.vy);if(spd>SMAX){ball.vx=ball.vx/spd*SMAX;ball.vy=ball.vy/spd*SMAX;}
+    }
+  }
+}
+
+function clampBallObj(ball) {
+  for(const s of CS){
+    const d=(ball.x-s.ax)*s.nx+(ball.y-s.ay)*s.ny;
+    if(d<-BR){
+      const dv=ball.vx*s.nx+ball.vy*s.ny;ball.vx-=2*dv*s.nx;ball.vy-=2*dv*s.ny;
+      const{cx,cy}=cPt(ball.x,ball.y,s.ax,s.ay,s.bx,s.by);
+      ball.x=cx+s.nx*(BR+1);ball.y=cy+s.ny*(BR+1);
+    }
+  }
+}
+
+function applyFFBall(gs, s, ball) {
+  const f = gs.fields[s];
+  if (!f || !f.active) return false;
+  const p = slotToPaddle(s, gs.paddles[s]);
+  const fcx = p.x+p.w/2, fcy = p.y+p.h/2;
+  const dx = ball.x-fcx, dy = ball.y-fcy;
+  const dist = Math.hypot(dx,dy);
+  const currentR = getFFRadius(f);
+  if (currentR < 2 || dist > currentR + BR) return false;
+  const view = SLOT_VIEW[s];
+  let nx=0,ny=0,sideOffset=0;
+  if(view==='bottom'){ny=-1;sideOffset=(ball.x-fcx)/(p.w/2);}
+  else if(view==='top'){ny=1;sideOffset=(ball.x-fcx)/(p.w/2);}
+  else if(view==='left'){nx=1;sideOffset=(ball.y-fcy)/(p.h/2);}
+  else{nx=-1;sideOffset=(ball.y-fcy)/(p.h/2);}
+  sideOffset=Math.max(-0.8,Math.min(0.8,sideOffset));
+  const speed=Math.min(Math.hypot(ball.vx,ball.vy)*BMULT,SMAX);
+  if(view==='bottom'||view==='top'){ball.vy=ny*Math.abs(speed)*0.85;ball.vx=sideOffset*speed*0.8;}
+  else{ball.vx=nx*Math.abs(speed)*0.85;ball.vy=sideOffset*speed*0.8;}
+  const actual=Math.hypot(ball.vx,ball.vy);
+  if(actual>0.01){ball.vx=ball.vx/actual*speed;ball.vy=ball.vy/actual*speed;}
+  ball.x=fcx+nx*(currentR+BR+2);ball.y=fcy+ny*(currentR+BR+2);
+  return true;
+}
+
 function tick(room) {
   const gs = room.game;
   if (!gs || gs.gameOver) return;
@@ -276,7 +326,8 @@ function tick(room) {
     const mn = isHoriz ? C+PL/2 : C+PLV/2;
     const mx = isHoriz ? W-C-PL/2 : H-C-PLV/2;
     const wallPos = isHoriz ? (view==='top'?PTH/2:H-PTH/2) : (view==='left'?PTV/2:W-PTV/2);
-    const pred = isHoriz ? predBall(gs,'x',wallPos) : predBall(gs,'y',wallPos);
+    const ball0 = gs.balls[0] || {x:W/2,y:H/2,vx:0,vy:0};
+    const pred = isHoriz ? predBall(ball0,'x',wallPos) : predBall(ball0,'y',wallPos);
     gs.botTargets[s] += (pred - gs.botTargets[s]) * 0.08;
     const diff = gs.botTargets[s] - gs.paddles[s];
     if (Math.abs(diff) > 2) gs.paddles[s] = Math.max(mn, Math.min(mx, gs.paddles[s] + Math.sign(diff)*Math.min(3.5,Math.abs(diff))));
@@ -303,69 +354,74 @@ function tick(room) {
     return;
   }
 
-  // ── М'яч ──
-  gs.ball.x += gs.ball.vx;
-  gs.ball.y += gs.ball.vy;
-
-  // Силові поля
-  for (const s of SLOTS) {
-    if (gs.eliminated[s]) continue;
-    if (applyFF(gs, s)) { broadcastState(room); return; }
-  }
-
-  // Кути
-  for(let i=0;i<3;i++) if(resolveChamfers(gs)) break;
-  clampBall(gs);
-
-  // Ракетки
-  for (const s of SLOTS) {
-    if (gs.eliminated[s]) continue;
-    const p = slotToPaddle(s, gs.paddles[s]);
-    if (hitRect(gs.ball, p)) {
-      const view = SLOT_VIEW[s];
-      const speed = Math.hypot(gs.ball.vx, gs.ball.vy);
-      // Позиція м'яча відносно центру ракетки (-1..1)
-      let sideOffset;
-      if (p.axis === 'x') {
-        sideOffset = Math.max(-0.85, Math.min(0.85, (gs.ball.x - (p.x+p.w/2)) / (p.w/2)));
-        gs.ball.y = view==='top' ? p.y+p.h+BR : p.y-BR;
-        gs.ball.vy = view==='top' ? Math.abs(speed)*0.85 : -Math.abs(speed)*0.85;
-        gs.ball.vx = sideOffset * speed * 0.7;
-      } else {
-        sideOffset = Math.max(-0.85, Math.min(0.85, (gs.ball.y - (p.y+p.h/2)) / (p.h/2)));
-        gs.ball.x = view==='left' ? p.x+p.w+BR : p.x-BR;
-        gs.ball.vx = view==='left' ? Math.abs(speed)*0.85 : -Math.abs(speed)*0.85;
-        gs.ball.vy = sideOffset * speed * 0.7;
-      }
-      // Нормалізуємо швидкість
-      const actual = Math.hypot(gs.ball.vx, gs.ball.vy);
-      if (actual > 0.01) { gs.ball.vx = gs.ball.vx/actual*speed; gs.ball.vy = gs.ball.vy/actual*speed; }
-      broadcastState(room);
-      return;
-    }
-  }
-
-  // ── Голи ──
   const goal = (slot) => {
     if (gs.eliminated[slot]) return false;
     gs.scores[slot]++; gs.lives[slot]--;
-    io.to(room.id).emit('goal', { slot, lives: {...gs.lives}, scores: {...gs.scores} });
     if (gs.lives[slot] <= 0) {
       gs.eliminated[slot] = true;
-      io.to(room.id).emit('eliminated', { slot });
       const active = activeSlots(gs);
       if (active.length === 1) { endGame(room, active[0]); return true; }
     }
-    spawnBall(gs);
-    return true;
+    return false;
   };
 
-  const bx=gs.ball.x, by=gs.ball.y;
-  // Гол рахується тільки коли м'яч ПОВНІСТЮ зник за межею (центр + радіус)
-  if (by+BR<0   && bx>C && bx<W-C) { if (!goal(1)) gs.ball.vy= Math.abs(gs.ball.vy); }
-  else if (by-BR>H && bx>C && bx<W-C) { if (!goal(0)) gs.ball.vy=-Math.abs(gs.ball.vy); }
-  else if (bx+BR<0 && by>C && by<H-C) { if (!goal(2)) gs.ball.vx= Math.abs(gs.ball.vx); }
-  else if (bx-BR>W && by>C && by<H-C) { if (!goal(3)) gs.ball.vx=-Math.abs(gs.ball.vx); }
+  // Фізика кожного м'яча
+  for (let bi = gs.balls.length - 1; bi >= 0; bi--) {
+    const ball = gs.balls[bi];
+    ball.x += ball.vx; ball.y += ball.vy;
+
+    // Силові поля
+    let removed = false;
+    for (const s of SLOTS) {
+      if (gs.eliminated[s]) continue;
+      if (applyFFBall(gs, s, ball)) { removed = false; break; }
+    }
+
+    // Кути
+    resolveChamfersBall(ball);
+    clampBallObj(ball);
+
+    // Ракетки
+    let hit = false;
+    for (const s of SLOTS) {
+      if (gs.eliminated[s]) continue;
+      const p = slotToPaddle(s, gs.paddles[s]);
+      if (hitRect(ball, p)) {
+        const view = SLOT_VIEW[s];
+        const speed = Math.hypot(ball.vx, ball.vy);
+        let sideOffset;
+        if (p.axis === 'x') {
+          sideOffset = Math.max(-0.85, Math.min(0.85, (ball.x-(p.x+p.w/2))/(p.w/2)));
+          ball.y = view==='top' ? p.y+p.h+BR : p.y-BR;
+          ball.vy = view==='top' ? Math.abs(speed)*0.85 : -Math.abs(speed)*0.85;
+          ball.vx = sideOffset * speed * 0.7;
+        } else {
+          sideOffset = Math.max(-0.85, Math.min(0.85, (ball.y-(p.y+p.h/2))/(p.h/2)));
+          ball.x = view==='left' ? p.x+p.w+BR : p.x-BR;
+          ball.vx = view==='left' ? Math.abs(speed)*0.85 : -Math.abs(speed)*0.85;
+          ball.vy = sideOffset * speed * 0.7;
+        }
+        const actual = Math.hypot(ball.vx, ball.vy);
+        if (actual > 0.01) { ball.vx = ball.vx/actual*speed; ball.vy = ball.vy/actual*speed; }
+        hit = true; break;
+      }
+    }
+    if (hit) continue;
+
+    // Голи
+    let scored = false;
+    const by = ball.y, bx2 = ball.x;
+    if (by-BR < 0 && bx2 > C && bx2 < W-C) {
+      if (!goal(1)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true;
+    } else if (by+BR > H && bx2 > C && bx2 < W-C) {
+      if (!goal(0)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true;
+    } else if (bx2-BR < 0 && by > C && by < H-C) {
+      if (!goal(2)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true;
+    } else if (bx2+BR > W && by > C && by < H-C) {
+      if (!goal(3)) { spawnBallQueued(gs); } gs.balls.splice(bi,1); scored=true;
+    }
+    if (scored && gs.gameOver) { broadcastState(room); return; }
+  }
 
   broadcastState(room);
   } catch(e) {
@@ -377,12 +433,8 @@ function broadcastState(room) {
   const gs = room.game;
   if (!gs) return;
   io.to(room.id).emit('gs', {
-    bx: Math.round(gs.ball.x*10)/10,
-    by: Math.round(gs.ball.y*10)/10,
-    bvx: Math.round(gs.ball.vx*100)/100,
-    bvy: Math.round(gs.ball.vy*100)/100,
-    rs: gs.respawn.active ? Math.round(gs.respawn.timer) : -1,
-    rvx: gs.respawn.vx, rvy: gs.respawn.vy,
+    balls: gs.balls.map(b=>({x:Math.round(b.x*10)/10,y:Math.round(b.y*10)/10,vx:Math.round(b.vx*100)/100,vy:Math.round(b.vy*100)/100,id:b.id})),
+    respawns: gs.respawns.map(r=>({timer:Math.round(r.timer),vx:r.vx,vy:r.vy})),
     p: [ // paddles — центри
       Math.round(gs.paddles[0]),
       Math.round(gs.paddles[1]),
