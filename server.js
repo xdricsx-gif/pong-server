@@ -172,11 +172,12 @@ function createGameState(room) {
     tick: 0,
   };
   // Використовуємо ту саму функцію що і для респауну
-  // Запускаємо 4 м'ячі одразу з невеликою затримкою між ними
+  // М'ячі стартують після pregame (5 сек) + затримка між ними
+  const PREGAME_DELAY = 5000;
   for(let i=0;i<4;i++){
     const ang=(Math.random()*0.6+0.2)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
     const spd=2.5+Math.random()*0.5;
-    gs.respawns.push({ timer: i*600, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd });
+    gs.respawns.push({ timer: PREGAME_DELAY + i*600, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd });
   }
   return gs;
 }
@@ -466,7 +467,29 @@ function endGame(room, winnerSlot) {
   gs.gameOver = true; gs.winner = winnerSlot;
   room.status = 'finished';
   if (room.tickInterval) { clearInterval(room.tickInterval); room.tickInterval = null; }
-  io.to(room.id).emit('game:over', { winnerSlot, players: buildPlayers(room) });
+
+  // Визначаємо місця: 1-ше=winner, решта за кількістю очок (scores)
+  const RATING_BY_PLACE = [50, 20, 5, -20]; // 1,2,3,4 місця
+  const places = [winnerSlot]; // 1-ше місце
+  // Решта сортуємо за scores DESC
+  const others = SLOTS.filter(s => s !== winnerSlot)
+    .sort((a,b) => (gs.scores[b]||0) - (gs.scores[a]||0));
+  places.push(...others); // places[0]=1ше, [1]=2ге, [2]=3тє, [3]=4те
+
+  const ratingDeltas = {};
+  places.forEach((slot, idx) => {
+    ratingDeltas[slot] = RATING_BY_PLACE[idx] || -20;
+  });
+
+  io.to(room.id).emit('game:over', {
+    winnerSlot,
+    players: buildPlayers(room),
+    ratingDeltas, // { slot: delta }
+    places,       // [slot1st, slot2nd, slot3rd, slot4th]
+  });
+
+  // Кімната закривається через 30с після кінця гри
+  setTimeout(() => { rooms.delete(room.id); }, 30000);
 }
 
 function startGame(room) {
