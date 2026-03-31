@@ -185,6 +185,11 @@ function createGameState(room) {
 
 function activeSlots(gs) { return SLOTS.filter(s => !gs.eliminated[s]); }
 
+function hitRect(ball, p) {
+  return ball.x+BR > p.x && ball.x-BR < p.x+p.w &&
+         ball.y+BR > p.y && ball.y-BR < p.y+p.h;
+}
+
 function applyFF(gs, s) {
   const f = gs.fields[s];
   if (!f || !f.active) return false;
@@ -271,7 +276,6 @@ function tick(room) {
       gs.respawn.active = false;
       gs.ball.vx = gs.respawn.vx;
       gs.ball.vy = gs.respawn.vy;
-      console.log('RESPAWN END: vx='+gs.ball.vx+' vy='+gs.ball.vy);
     }
     broadcastState(room);
     return;
