@@ -168,7 +168,7 @@ function createGameState(room) {
     lives: { 0: ML, 1: ML, 2: ML, 3: ML },
     scores: { 0: 0, 1: 0, 2: 0, 3: 0 },
     energy: { 0: 1, 1: 1, 2: 1, 3: 1 },
-    fields: { 0:{active:false,t:0}, 1:{active:false,t:0}, 2:{active:false,t:0}, 3:{active:false,t:0} },
+    fields: { 0:{active:false,t:0,r:0}, 1:{active:false,t:0,r:0}, 2:{active:false,t:0,r:0}, 3:{active:false,t:0,r:0} },
     eliminated: { 0: false, 1: false, 2: false, 3: false },
     botTargets: { 0: W/2, 1: W/2, 2: H/2, 3: H/2 },
     gameOver: false,
@@ -190,6 +190,11 @@ function hitRect(ball, p) {
          ball.y+BR > p.y && ball.y-BR < p.y+p.h;
 }
 
+function getFFRadius(f) {
+  // Радіус розширюється від 0 до FR за час FDR
+  return Math.min(FR, (f.t / FDR) * FR);
+}
+
 function applyFF(gs, s) {
   const f = gs.fields[s];
   if (!f || !f.active) return false;
@@ -197,22 +202,18 @@ function applyFF(gs, s) {
   const fcx = p.x + p.w/2, fcy = p.y + p.h/2;
   const dx = gs.ball.x - fcx, dy = gs.ball.y - fcy;
   const dist = Math.hypot(dx, dy);
-  const FF_RADIUS = FR * 1.3;
-  if (dist > FF_RADIUS + BR) return false;
+  const currentR = getFFRadius(f);
+  if (dist > currentR + BR) return false;
 
-  // Прогнозоване відбиття: відбиваємо від нормалі ракетки (як від стінки)
-  // і додаємо бічний компонент залежно від позиції на ракетці
   const view = SLOT_VIEW[s];
   let nx = 0, ny = 0;
-  let sideOffset = 0; // позиція на ракетці (-1..1)
+  let sideOffset = 0;
   if (view === 'bottom') { ny = -1; sideOffset = (gs.ball.x - fcx) / (p.w/2); }
   else if (view === 'top')    { ny =  1; sideOffset = (gs.ball.x - fcx) / (p.w/2); }
   else if (view === 'left')   { nx =  1; sideOffset = (gs.ball.y - fcy) / (p.h/2); }
   else if (view === 'right')  { nx = -1; sideOffset = (gs.ball.y - fcy) / (p.h/2); }
-
   sideOffset = Math.max(-0.8, Math.min(0.8, sideOffset));
 
-  // Відбиваємо: компонент по нормалі завжди від ракетки, бічний залишаємо + spin
   const speed = Math.min(Math.hypot(gs.ball.vx, gs.ball.vy) * BMULT, SMAX);
   if (view === 'bottom' || view === 'top') {
     gs.ball.vy = ny * Math.abs(speed) * 0.85;
@@ -221,12 +222,10 @@ function applyFF(gs, s) {
     gs.ball.vx = nx * Math.abs(speed) * 0.85;
     gs.ball.vy = sideOffset * speed * 0.8;
   }
-  // Нормалізуємо до speed
   const actual = Math.hypot(gs.ball.vx, gs.ball.vy);
   if (actual > 0.01) { gs.ball.vx = gs.ball.vx/actual*speed; gs.ball.vy = gs.ball.vy/actual*speed; }
-
-  gs.ball.x = fcx + nx*(FF_RADIUS + BR + 2);
-  gs.ball.y = fcy + ny*(FF_RADIUS + BR + 2);
+  gs.ball.x = fcx + nx*(currentR + BR + 2);
+  gs.ball.y = fcy + ny*(currentR + BR + 2);
   f.active = false; f.t = 0;
   return true;
 }
@@ -242,7 +241,10 @@ function tick(room) {
     if (gs.eliminated[s]) continue;
     if (gs.fields[s].active) {
       gs.fields[s].t += TICK_MS;
-      if (gs.fields[s].t >= FDR) { gs.fields[s].active = false; gs.fields[s].t = 0; }
+      // Плавне розширення від 0 до FR за перші 200мс
+      const expandTime = 200;
+      gs.fields[s].r = Math.min(FR, (gs.fields[s].t / expandTime) * FR);
+      if (gs.fields[s].t >= FDR) { gs.fields[s].active = false; gs.fields[s].t = 0; gs.fields[s].r = 0; }
     } else {
       gs.energy[s] = Math.min(1, gs.energy[s] + ECR * TICK_MS);
     }
@@ -260,8 +262,9 @@ function tick(room) {
     if (inp.left)  gs.paddles[s] = Math.max(mn, gs.paddles[s] - PS);
     if (inp.right) gs.paddles[s] = Math.min(mx, gs.paddles[s] + PS);
     if (inp.boost && !gs.fields[s].active && gs.energy[s] >= EPU) {
-      gs.fields[s].active = true; gs.fields[s].t = 0;
+      gs.fields[s].active = true; gs.fields[s].t = 0; gs.fields[s].r = 0;
       gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
+      inp.boost = false;
     }
   }
 
@@ -392,11 +395,11 @@ function broadcastState(room) {
       Math.round(gs.energy[2]*100),
       Math.round(gs.energy[3]*100),
     ],
-    f: [ // fields active
-      gs.fields[0].active?1:0,
-      gs.fields[1].active?1:0,
-      gs.fields[2].active?1:0,
-      gs.fields[3].active?1:0,
+    f: [ // fields — поточний радіус (0 = неактивне)
+      gs.fields[0].active ? Math.round(getFFRadius(gs.fields[0])) : 0,
+      gs.fields[1].active ? Math.round(getFFRadius(gs.fields[1])) : 0,
+      gs.fields[2].active ? Math.round(getFFRadius(gs.fields[2])) : 0,
+      gs.fields[3].active ? Math.round(getFFRadius(gs.fields[3])) : 0,
     ],
     el: [ // eliminated
       gs.eliminated[0]?1:0,
