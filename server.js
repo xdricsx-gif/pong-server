@@ -185,6 +185,28 @@ function createGameState(room) {
 
 function activeSlots(gs) { return SLOTS.filter(s => !gs.eliminated[s]); }
 
+function applyFF(gs, s) {
+  const f = gs.fields[s];
+  if (!f || !f.active) return false;
+  const p = slotToPaddle(s, gs.paddles[s]);
+  const fcx = p.x + p.w/2, fcy = p.y + p.h/2;
+  const dx = gs.ball.x - fcx, dy = gs.ball.y - fcy;
+  const dist = Math.hypot(dx, dy);
+  const FF_RADIUS = FR * 1.3;
+  if (dist > FF_RADIUS + BR) return false;
+  const nx = dist > 0.001 ? dx/dist : 0;
+  const ny = dist > 0.001 ? dy/dist : 1;
+  const dot = gs.ball.vx*nx + gs.ball.vy*ny;
+  gs.ball.vx -= 2*dot*nx; gs.ball.vy -= 2*dot*ny;
+  const spd = Math.hypot(gs.ball.vx, gs.ball.vy);
+  const ns = Math.min(spd * BMULT, SMAX);
+  gs.ball.vx = gs.ball.vx/spd*ns; gs.ball.vy = gs.ball.vy/spd*ns;
+  gs.ball.x = fcx + nx*(FF_RADIUS + BR + 2);
+  gs.ball.y = fcy + ny*(FF_RADIUS + BR + 2);
+  f.active = false; f.t = 0;
+  return true;
+}
+
 function tick(room) {
   const gs = room.game;
   if (!gs || gs.gameOver) return;
