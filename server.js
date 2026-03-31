@@ -397,7 +397,7 @@ function startGame(room) {
   });
   // Надсилаємо mySlot кожному окремо
   for (const [sid, player] of Object.entries(room.players)) {
-    io.to(sid).emit('myslot', { mySlot: player.slot });
+    io.to(sid).emit('myslot', { mySlot: player.slot, roomId: room.id });
   }
   room.tickInterval = setInterval(() => tick(room), TICK_MS);
   console.log(`Game started: ${room.id}, ${Object.keys(room.players).length} real players`);
@@ -427,13 +427,48 @@ io.on('connection', (socket) => {
 
     room.players[socket.id] = { slot: mySlot, nick, rating, uid, input: {} };
     socket.join(room.id);
-    socket.emit('mm:joined', { mySlot });
+    socket.emit('mm:joined', { mySlot, roomId: room.id });
     broadcastLobby(room);
 
     const count = Object.keys(room.players).length;
     if (count === 1) { room.status = 'waiting'; socket.emit('mm:waiting', {}); }
     else if (count >= 4) { if (room.countdownTimer) { clearInterval(room.countdownTimer); room.countdownTimer = null; } startGame(room); }
     else startCountdown(room);
+  });
+
+  // Реконект — гравець повертається в кімнату
+  socket.on('rejoin', ({ roomId, slot, nick, rating, uid }) => {
+    const room = rooms.get(roomId);
+    if (!room) { socket.emit('rejoin:fail', { reason: 'room_gone' }); return; }
+
+    // Кімната існує — відновлюємо гравця
+    myRoom = room;
+    mySlot = slot;
+
+    // Замінюємо бота назад на гравця
+    delete room.bots[slot];
+    room.players[socket.id] = { slot, nick, rating, uid, input: {} };
+    socket.join(room.id);
+
+    if (room.status === 'playing' && room.game) {
+      // Гра іде — повертаємо в гру
+      const gs = room.game;
+      socket.emit('rejoin:game', {
+        mySlot: slot,
+        players: buildPlayers(room),
+        gameOver: gs.gameOver,
+        winner: gs.winner,
+        lives: gs.lives,
+        scores: gs.scores,
+      });
+      socket.emit('myslot', { mySlot: slot });
+    } else if (room.status === 'waiting' || room.status === 'countdown') {
+      // Ще в лобі
+      socket.emit('rejoin:lobby', { mySlot: slot });
+      broadcastLobby(room);
+    } else {
+      socket.emit('rejoin:fail', { reason: 'unknown_status' });
+    }
   });
 
   // Гравець надсилає стан кнопок (не позицію!)
@@ -456,8 +491,10 @@ io.on('connection', (socket) => {
       rooms.delete(myRoom.id);
     } else {
       broadcastLobby(myRoom);
-      if (myRoom.game?.started && mySlot !== null) {
-        myRoom.bots[mySlot] = { nick: BOT_NAMES[0], rating: 500 };
+      if (myRoom.status === 'playing' && mySlot !== null) {
+        // Зберігаємо інфо про відключеного гравця для реконекту
+        const pinfo = myRoom.players[socket.id];
+        myRoom.bots[mySlot] = { nick: pinfo?.nick || BOT_NAMES[0], rating: pinfo?.rating || 500, _disconnectedUid: pinfo?.uid, _disconnectedSlot: mySlot };
         io.to(myRoom.id).emit('player:left', { slot: mySlot });
       } else if (myRoom.status === 'countdown' && count === 1) {
         if (myRoom.countdownTimer) { clearInterval(myRoom.countdownTimer); myRoom.countdownTimer = null; }
