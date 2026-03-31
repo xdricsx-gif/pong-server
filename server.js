@@ -342,17 +342,7 @@ function tick(room) {
     }
   }
 
-  // ── Respawn ──
-  if (gs.respawn.active) {
-    gs.respawn.timer -= TICK_MS;
-    if (gs.respawn.timer <= 0) {
-      gs.respawn.active = false;
-      gs.ball.vx = gs.respawn.vx;
-      gs.ball.vy = gs.respawn.vy;
-    }
-    broadcastState(room);
-    return;
-  }
+  // respawn handled above via gs.respawns[]
 
   const goal = (slot) => {
     if (gs.eliminated[slot]) return false;
