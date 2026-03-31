@@ -17,7 +17,7 @@ const TICK_RATE = 60;
 const TICK_MS = 1000 / TICK_RATE;
 
 // ── КОНСТАНТИ (мають збігатись з клієнтом) ──
-const W = 520, H = 520, BR = 8, SMAX = 4.875, C = 88;
+const W = 520, H = 520, BR = 8, SMAX = 4.875, C = 130;
 const PL = 54, PLV = 54, PTH = 16, PTV = 16;
 const ML = 10, EPU = 1 / 3, ECR = 1 / 10000;
 const FDR = 380, BMULT = 1.55, FR = 36, RD = 1500;
@@ -199,13 +199,32 @@ function applyFF(gs, s) {
   const dist = Math.hypot(dx, dy);
   const FF_RADIUS = FR * 1.3;
   if (dist > FF_RADIUS + BR) return false;
-  const nx = dist > 0.001 ? dx/dist : 0;
-  const ny = dist > 0.001 ? dy/dist : 1;
-  const dot = gs.ball.vx*nx + gs.ball.vy*ny;
-  gs.ball.vx -= 2*dot*nx; gs.ball.vy -= 2*dot*ny;
-  const spd = Math.hypot(gs.ball.vx, gs.ball.vy);
-  const ns = Math.min(spd * BMULT, SMAX);
-  gs.ball.vx = gs.ball.vx/spd*ns; gs.ball.vy = gs.ball.vy/spd*ns;
+
+  // Прогнозоване відбиття: відбиваємо від нормалі ракетки (як від стінки)
+  // і додаємо бічний компонент залежно від позиції на ракетці
+  const view = SLOT_VIEW[s];
+  let nx = 0, ny = 0;
+  let sideOffset = 0; // позиція на ракетці (-1..1)
+  if (view === 'bottom') { ny = -1; sideOffset = (gs.ball.x - fcx) / (p.w/2); }
+  else if (view === 'top')    { ny =  1; sideOffset = (gs.ball.x - fcx) / (p.w/2); }
+  else if (view === 'left')   { nx =  1; sideOffset = (gs.ball.y - fcy) / (p.h/2); }
+  else if (view === 'right')  { nx = -1; sideOffset = (gs.ball.y - fcy) / (p.h/2); }
+
+  sideOffset = Math.max(-0.8, Math.min(0.8, sideOffset));
+
+  // Відбиваємо: компонент по нормалі завжди від ракетки, бічний залишаємо + spin
+  const speed = Math.min(Math.hypot(gs.ball.vx, gs.ball.vy) * BMULT, SMAX);
+  if (view === 'bottom' || view === 'top') {
+    gs.ball.vy = ny * Math.abs(speed) * 0.85;
+    gs.ball.vx = sideOffset * speed * 0.8;
+  } else {
+    gs.ball.vx = nx * Math.abs(speed) * 0.85;
+    gs.ball.vy = sideOffset * speed * 0.8;
+  }
+  // Нормалізуємо до speed
+  const actual = Math.hypot(gs.ball.vx, gs.ball.vy);
+  if (actual > 0.01) { gs.ball.vx = gs.ball.vx/actual*speed; gs.ball.vy = gs.ball.vy/actual*speed; }
+
   gs.ball.x = fcx + nx*(FF_RADIUS + BR + 2);
   gs.ball.y = fcy + ny*(FF_RADIUS + BR + 2);
   f.active = false; f.t = 0;
@@ -301,14 +320,23 @@ function tick(room) {
     const p = slotToPaddle(s, gs.paddles[s]);
     if (hitRect(gs.ball, p)) {
       const view = SLOT_VIEW[s];
+      const speed = Math.hypot(gs.ball.vx, gs.ball.vy);
+      // Позиція м'яча відносно центру ракетки (-1..1)
+      let sideOffset;
       if (p.axis === 'x') {
+        sideOffset = Math.max(-0.85, Math.min(0.85, (gs.ball.x - (p.x+p.w/2)) / (p.w/2)));
         gs.ball.y = view==='top' ? p.y+p.h+BR : p.y-BR;
-        gs.ball.vy = view==='top' ? Math.abs(gs.ball.vy) : -Math.abs(gs.ball.vy);
+        gs.ball.vy = view==='top' ? Math.abs(speed)*0.85 : -Math.abs(speed)*0.85;
+        gs.ball.vx = sideOffset * speed * 0.7;
       } else {
+        sideOffset = Math.max(-0.85, Math.min(0.85, (gs.ball.y - (p.y+p.h/2)) / (p.h/2)));
         gs.ball.x = view==='left' ? p.x+p.w+BR : p.x-BR;
-        gs.ball.vx = view==='left' ? Math.abs(gs.ball.vx) : -Math.abs(gs.ball.vx);
+        gs.ball.vx = view==='left' ? Math.abs(speed)*0.85 : -Math.abs(speed)*0.85;
+        gs.ball.vy = sideOffset * speed * 0.7;
       }
-      addSpin(gs, p);
+      // Нормалізуємо швидкість
+      const actual = Math.hypot(gs.ball.vx, gs.ball.vy);
+      if (actual > 0.01) { gs.ball.vx = gs.ball.vx/actual*speed; gs.ball.vy = gs.ball.vy/actual*speed; }
       broadcastState(room);
       return;
     }
