@@ -249,6 +249,7 @@ function tick(room) {
       gs.respawn.active = false;
       gs.ball.vx = gs.respawn.vx;
       gs.ball.vy = gs.respawn.vy;
+      console.log('RESPAWN END: vx='+gs.ball.vx+' vy='+gs.ball.vy);
     }
     broadcastState(room);
     return;
