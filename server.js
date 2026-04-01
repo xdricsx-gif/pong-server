@@ -273,20 +273,42 @@ function applyFFBall(gs, s, ball) {
   const dx = ball.x-fcx, dy = ball.y-fcy;
   const dist = Math.hypot(dx,dy);
   const currentR = getFFRadius(f);
-  if (currentR < 2 || dist > currentR + BR) return false;
-  const view = SLOT_VIEW[s];
-  let nx=0,ny=0,sideOffset=0;
-  if(view==='bottom'){ny=-1;sideOffset=(ball.x-fcx)/(p.w/2);}
-  else if(view==='top'){ny=1;sideOffset=(ball.x-fcx)/(p.w/2);}
-  else if(view==='left'){nx=1;sideOffset=(ball.y-fcy)/(p.h/2);}
-  else{nx=-1;sideOffset=(ball.y-fcy)/(p.h/2);}
-  sideOffset=Math.max(-0.8,Math.min(0.8,sideOffset));
-  const speed=Math.min(Math.hypot(ball.vx,ball.vy)*BMULT,SMAX);
-  if(view==='bottom'||view==='top'){ball.vy=ny*Math.abs(speed)*0.85;ball.vx=sideOffset*speed*0.8;}
-  else{ball.vx=nx*Math.abs(speed)*0.85;ball.vy=sideOffset*speed*0.8;}
-  const actual=Math.hypot(ball.vx,ball.vy);
-  if(actual>0.01){ball.vx=ball.vx/actual*speed;ball.vy=ball.vy/actual*speed;}
-  ball.x=fcx+nx*(currentR+BR+2);ball.y=fcy+ny*(currentR+BR+2);
+  if (currentR < 2) return false;
+
+  // ── Відбиття від будь-якої сторони кола ──
+  // Якщо м'яч всередині або торкається кола — відбиваємо
+  if (dist > currentR + BR) return false;
+
+  // Нормаль від центру поля до м'яча (куди відбиваємо)
+  let nx, ny;
+  if (dist > 0.5) {
+    nx = dx / dist;
+    ny = dy / dist;
+  } else {
+    // М'яч точно в центрі — відбиваємо від ракетки
+    const view = SLOT_VIEW[s];
+    nx = view==='bottom'?0:view==='top'?0:view==='left'?1:-1;
+    ny = view==='bottom'?-1:view==='top'?1:0;
+  }
+
+  // Відбиваємо тільки якщо м'яч летить до центру поля
+  const dot = ball.vx*nx + ball.vy*ny;
+  if (dot > 0) return false; // вже летить від центру — не чіпаємо
+
+  // Дзеркальне відбиття + прискорення
+  const speed = Math.min(Math.hypot(ball.vx,ball.vy)*BMULT, SMAX);
+  ball.vx -= 2*dot*nx;
+  ball.vy -= 2*dot*ny;
+  // Нормалізуємо до нової швидкості
+  const actual = Math.hypot(ball.vx, ball.vy);
+  if (actual > 0.01) { ball.vx = ball.vx/actual*speed; ball.vy = ball.vy/actual*speed; }
+
+  // Виштовхуємо м'яч за межу поля
+  ball.x = fcx + nx*(currentR + BR + 1);
+  ball.y = fcy + ny*(currentR + BR + 1);
+
+  // ── НЕ деактивуємо поле — воно живе до кінця таймера ──
+  // f.active = false; // ВИДАЛЕНО — поле може відбити кілька м'ячів
   return true;
 }
 
