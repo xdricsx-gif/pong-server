@@ -292,12 +292,17 @@ function tick(room) {
     if (gs.eliminated[s]) continue;
     if (gs.fields[s].active) {
       gs.fields[s].t += TICK_MS;
-      // Плавне розширення від 0 до FR за перші 200мс
       const expandTime = 200;
       gs.fields[s].r = Math.min(FR, (gs.fields[s].t / expandTime) * FR);
-      if (gs.fields[s].t >= FDR) { gs.fields[s].active = false; gs.fields[s].t = 0; gs.fields[s].r = 0; }
+      // Тривалість поля залежить від paddleStats.fd
+      const pStats = Object.values(room.players).find(p=>p.slot===s)?.paddleStats;
+      const fd = pStats?.fd || 1.0;
+      if (gs.fields[s].t >= FDR * fd) { gs.fields[s].active = false; gs.fields[s].t = 0; gs.fields[s].r = 0; }
     } else {
-      gs.energy[s] = Math.min(1, gs.energy[s] + ECR * TICK_MS);
+      // Заряджання залежить від paddleStats.er
+      const pStats2 = Object.values(room.players).find(p=>p.slot===s)?.paddleStats;
+      const er = pStats2?.er || 1.0;
+      gs.energy[s] = Math.min(1, gs.energy[s] + ECR * TICK_MS * er);
     }
   }
 
@@ -574,7 +579,7 @@ io.on('connection', (socket) => {
     }
 
     room.players[socket.id] = { slot: mySlot, nick, rating, uid, wins: wins||0, games: games||0, input: {},
-      paddleStats: paddleStats || { spd:3.375, w:54, fr:54, bm:2.32 }
+      paddleStats: paddleStats || { spd:3.375, w:54, fr:54, bm:2.32, er:1.0, fd:1.0 }
     };
     socket.join(room.id);
     socket.emit('mm:joined', { mySlot, roomId: room.id });
