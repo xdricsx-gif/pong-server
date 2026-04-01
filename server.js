@@ -35,12 +35,21 @@ const CS = [
 ];
 
 
-function slotToPaddle(slot, cx) {
+function slotToPaddle(slot, cx, gs, room) {
   const view = SLOT_VIEW[slot];
-  if (view==='bottom') return {x:cx-PL/2, y:H-PTH-2, w:PL, h:PTH, axis:'x', min:C, max:W-C-PL};
-  if (view==='top')    return {x:cx-PL/2, y:2,        w:PL, h:PTH, axis:'x', min:C, max:W-C-PL};
-  if (view==='left')   return {x:2,        y:cx-PLV/2, w:PTV, h:PLV, axis:'y', min:C, max:H-C-PLV};
-  if (view==='right')  return {x:W-PTV-2,  y:cx-PLV/2, w:PTV, h:PLV, axis:'y', min:C, max:H-C-PLV};
+  // Беремо ширину з paddleStats гравця якщо є
+  let pw = PL, pvh = PLV;
+  if (room) {
+    const player = Object.values(room.players).find(p => p.slot === slot);
+    if (player && player.paddleStats && player.paddleStats.w) {
+      if (view === 'bottom' || view === 'top') pw = player.paddleStats.w;
+      else pvh = player.paddleStats.w;
+    }
+  }
+  if (view==='bottom') return {x:cx-pw/2,  y:H-PTH-2, w:pw,  h:PTH, axis:'x', min:C, max:W-C-pw};
+  if (view==='top')    return {x:cx-pw/2,  y:2,        w:pw,  h:PTH, axis:'x', min:C, max:W-C-pw};
+  if (view==='left')   return {x:2,         y:cx-pvh/2, w:PTV, h:pvh, axis:'y', min:C, max:H-C-pvh};
+  if (view==='right')  return {x:W-PTV-2,   y:cx-pvh/2, w:PTV, h:pvh, axis:'y', min:C, max:H-C-pvh};
 }
 
 function cPt(px, py, ax, ay, bx, by) {
