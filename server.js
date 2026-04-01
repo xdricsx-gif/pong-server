@@ -466,6 +466,14 @@ function broadcastState(room) {
   });
 }
 
+function getTrainingRewards(winnerSlot, mySlot) {
+  // В тренуванні завжди виграє гравець (slot 0) або займає місце
+  const place = mySlot === winnerSlot ? 0 : 1;
+  const xpMap = [60, 30, 15, 5];
+  const silverMap = [80, 40, 20, 5];
+  return { xp: xpMap[place]||5, silver: silverMap[place]||5, place };
+}
+
 function endGame(room, winnerSlot) {
   const gs = room.game;
   gs.gameOver = true; gs.winner = winnerSlot;
@@ -485,11 +493,20 @@ function endGame(room, winnerSlot) {
     ratingDeltas[slot] = RATING_BY_PLACE[idx] || -20;
   });
 
+  // Перевіряємо чи це тренування
+  const isTraining = Object.values(room.players).some(p => p.trainingMode);
+  let trainingRewards = null;
+  if(isTraining){
+    const realPlayer = Object.values(room.players).find(p=>p.trainingMode);
+    if(realPlayer) trainingRewards = getTrainingRewards(winnerSlot, realPlayer.slot);
+  }
+
   io.to(room.id).emit('game:over', {
     winnerSlot,
     players: buildPlayers(room),
-    ratingDeltas, // { slot: delta }
-    places,       // [slot1st, slot2nd, slot3rd, slot4th]
+    ratingDeltas: isTraining ? {} : ratingDeltas,
+    places,
+    trainingRewards,
   });
 
   // Кімната закривається через 30с після кінця гри
@@ -528,7 +545,20 @@ function startCountdown(room) {
 io.on('connection', (socket) => {
   let myRoom = null, mySlot = null;
 
-  socket.on('mm:join', ({ nick, rating, uid, wins, games, paddleStats }) => {
+  socket.on('mm:join', ({ nick, rating, uid, wins, games, paddleStats, trainingMode }) => {
+    // Тренування — особлива кімната тільки для цього гравця
+    if(trainingMode){
+      const tRoom = createRoom('training_'+socket.id);
+      rooms.set(tRoom.id, tRoom);
+      myRoom = tRoom; mySlot = 0;
+      tRoom.players[socket.id] = { slot:0, nick, rating, uid, wins:wins||0, games:games||0, input:{},
+        paddleStats: paddleStats||{spd:3.375,w:54,fr:54,bm:2.32}, trainingMode:true };
+      socket.join(tRoom.id);
+      socket.emit('mm:joined',{mySlot:0,roomId:tRoom.id});
+      socket.emit('myslot',{mySlot:0,roomId:tRoom.id});
+      startGame(tRoom);
+      return;
+    }
     const room = findOrCreateRoom();
     myRoom = room;
     mySlot = getAvailableSlot(room);
