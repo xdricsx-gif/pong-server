@@ -291,9 +291,9 @@ function applyFFBall(gs, s, ball) {
     ny = view==='bottom'?-1:view==='top'?1:0;
   }
 
-  // Відбиваємо тільки якщо м'яч летить до центру поля
+  // Відбиваємо тільки якщо м'яч летить до центру (або глибоко всередині)
   const dot = ball.vx*nx + ball.vy*ny;
-  if (dot > 0) return false; // вже летить від центру — не чіпаємо
+  if (dot > 0 && dist > currentR*0.5) return false; // якщо глибоко всередині — виштовхуємо
 
   // Дзеркальне відбиття + прискорення
   const speed = Math.min(Math.hypot(ball.vx,ball.vy)*BMULT, SMAX);
