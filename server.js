@@ -325,9 +325,9 @@ function tick(room) {
       gs.fields[s].t += TICK_MS;
       const expandTime = 200;
       const pStats = Object.values(room.players).find(p=>p.slot===s)?.paddleStats;
-      const fr = pStats?.fr || FR; // радіус поля з ракетки гравця
       const fd = pStats?.fd || 1.0;
-      gs.fields[s].r = Math.min(fr, (gs.fields[s].t / expandTime) * fr);
+      const maxRf = gs.fields[s].maxR || pStats?.fr || FR;
+      gs.fields[s].r = Math.min(maxRf, (gs.fields[s].t / expandTime) * maxRf);
       if (gs.fields[s].t >= FDR * fd) { gs.fields[s].active = false; gs.fields[s].t = 0; gs.fields[s].r = 0; }
     } else {
       // Заряджання залежить від paddleStats.er
@@ -353,7 +353,11 @@ function tick(room) {
     if (inp.left)  gs.paddles[s] = Math.max(mn, gs.paddles[s] - pSpd);
     if (inp.right) gs.paddles[s] = Math.min(mx, gs.paddles[s] + pSpd);
     if (inp.boost && !gs.fields[s].active && gs.energy[s] >= EPU) {
-      gs.fields[s].active = true; gs.fields[s].t = 0; gs.fields[s].r = 0;
+      const _boostPs = Object.values(room.players).find(p=>p.slot===s)?.paddleStats;
+      gs.fields[s].active = true;
+      gs.fields[s].t = 0;
+      gs.fields[s].r = 0;
+      gs.fields[s].maxR = _boostPs?.fr || FR; // зберігаємо радіус з paddleStats
       gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
       inp.boost = false;
     }
