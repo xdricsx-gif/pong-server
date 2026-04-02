@@ -274,10 +274,10 @@ function applyFFBall(gs, s, ball) {
   const dist = Math.hypot(dx,dy);
   const currentR = getFFRadius(f);
   if (currentR < 2) return false;
+  const maxR = f.maxR || FR;
 
-  // ── Відбиття від будь-якої сторони кола ──
-  // Якщо м'яч всередині або торкається кола — відбиваємо
-  if (dist > currentR + BR) return false;
+  // Перевіряємо по maxR — ловимо м'яч навіть якщо поле ще розширюється
+  if (dist > maxR + BR) return false;
 
   // Нормаль від центру поля до м'яча (куди відбиваємо)
   let nx, ny;
@@ -304,8 +304,10 @@ function applyFFBall(gs, s, ball) {
   if (actual > 0.01) { ball.vx = ball.vx/actual*speed; ball.vy = ball.vy/actual*speed; }
 
   // Виштовхуємо м'яч за межу поля
-  ball.x = fcx + nx*(currentR + BR + 1);
-  ball.y = fcy + ny*(currentR + BR + 1);
+  // Виштовхуємо за межу поточного або максимального радіусу
+  const pushR = Math.max(currentR, dist);
+  ball.x = fcx + nx*(pushR + BR + 1);
+  ball.y = fcy + ny*(pushR + BR + 1);
 
   // ── НЕ деактивуємо поле — воно живе до кінця таймера ──
   // f.active = false; // ВИДАЛЕНО — поле може відбити кілька м'ячів
