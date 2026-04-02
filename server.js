@@ -585,6 +585,16 @@ function startCountdown(room) {
 io.on('connection', (socket) => {
   let myRoom = null, mySlot = null;
 
+  socket.on('paddle:stats',({slot,paddleStats})=>{
+    // Оновлюємо paddleStats після того як слот призначено
+    const player=Object.values(myRoom?.players||{}).find(p=>p.slot===slot&&p.uid===Object.values(myRoom?.players||{}).find(pp=>pp.slot===slot)?.uid);
+    if(myRoom){
+      for(const [sid,p] of Object.entries(myRoom.players)){
+        if(p.slot===slot){p.paddleStats=paddleStats;break;}
+      }
+    }
+  });
+
   socket.on('mm:join', ({ nick, rating, uid, wins, games, paddleStats, trainingMode }) => {
     // Тренування — особлива кімната тільки для цього гравця
     if(trainingMode){
