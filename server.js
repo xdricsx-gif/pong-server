@@ -199,8 +199,8 @@ function hitRect(ball, p) {
 }
 
 function getFFRadius(f) {
-  // Радіус розширюється від 0 до FR за час FDR
-  return Math.min(FR, (f.t / FDR) * FR);
+  const maxR = f.maxR || FR;
+  return Math.min(maxR, (f.t / 200) * maxR); // розширюється за 200ms
 }
 
 function applyFF(gs, s) {
@@ -324,10 +324,10 @@ function tick(room) {
     if (gs.fields[s].active) {
       gs.fields[s].t += TICK_MS;
       const expandTime = 200;
-      gs.fields[s].r = Math.min(FR, (gs.fields[s].t / expandTime) * FR);
-      // Тривалість поля залежить від paddleStats.fd
       const pStats = Object.values(room.players).find(p=>p.slot===s)?.paddleStats;
+      const fr = pStats?.fr || FR; // радіус поля з ракетки гравця
       const fd = pStats?.fd || 1.0;
+      gs.fields[s].r = Math.min(fr, (gs.fields[s].t / expandTime) * fr);
       if (gs.fields[s].t >= FDR * fd) { gs.fields[s].active = false; gs.fields[s].t = 0; gs.fields[s].r = 0; }
     } else {
       // Заряджання залежить від paddleStats.er
