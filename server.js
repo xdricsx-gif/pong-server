@@ -499,6 +499,10 @@ function broadcastState(room) {
     el: [gs.eliminated[0]?1:0,gs.eliminated[1]?1:0,gs.eliminated[2]?1:0,gs.eliminated[3]?1:0],
     lv: [gs.lives[0],gs.lives[1],gs.lives[2],gs.lives[3]],
     sc: [gs.scores[0],gs.scores[1],gs.scores[2],gs.scores[3]],
+    pw: SLOTS.map(s=>{ // paddle widths for all slots
+      const p=Object.values(room.players).find(p=>p.slot===s);
+      return p&&p.paddleStats&&p.paddleStats.w ? Math.round(p.paddleStats.w) : PL;
+    }),
   });
 }
 
