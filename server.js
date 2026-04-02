@@ -13,7 +13,7 @@ const io = new Server(httpServer, {
 });
 
 const PORT = process.env.PORT || 3000;
-const TICK_RATE = 60;
+const TICK_RATE = 30;
 const TICK_MS = 1000 / TICK_RATE;
 
 // ── КОНСТАНТИ (мають збігатись з клієнтом) ──
