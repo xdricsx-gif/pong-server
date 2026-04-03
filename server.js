@@ -107,7 +107,12 @@ function predBall(ball, axis, wp) {
 function spawnBallQueued(gs) {
   const ang=(Math.random()*0.6+0.2)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
   const spd=2.5+Math.random()*0.5;
-  gs.respawns.push({ timer: RD, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd });
+  // Якщо вже є м'ячі в черзі — ставимо після останнього з інтервалом 2сек
+  const lastTimer = gs.respawns.length > 0
+    ? Math.max(...gs.respawns.map(r => r.timer))
+    : 0;
+  const delay = Math.max(2000, lastTimer + 2000);
+  gs.respawns.push({ timer: delay, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd });
 }
 
 const rooms = new Map();
