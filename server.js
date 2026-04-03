@@ -188,10 +188,11 @@ function createGameState(room) {
   // Використовуємо ту саму функцію що і для респауну
   // М'ячі стартують після pregame (5 сек) + затримка між ними
   const PREGAME_DELAY = 5000;
+  // Перший м'яч через 3сек після старту, решта +2сек кожен
   for(let i=0;i<4;i++){
     const ang=(Math.random()*0.6+0.2)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
     const spd=2.5+Math.random()*0.5;
-    gs.respawns.push({ timer: PREGAME_DELAY + i*600, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd });
+    gs.respawns.push({ timer: PREGAME_DELAY + 3000 + i*2000, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd });
   }
   return gs;
 }
