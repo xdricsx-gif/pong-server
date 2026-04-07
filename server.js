@@ -225,8 +225,8 @@ function tick(room) {
   const gs = room.game;
   if (!gs || gs.gameOver) return;
   gs.tick++;
-  // Rollback netcode потребує balls кожен тік для точного порівняння
-  const sendBalls = true;
+  // М'ячі надсилаємо 20 разів/сек (кожен 3-й тік)
+  const sendBalls = (gs.tick % 3 === 0);
   try {
     for (const s of SLOTS) {
       if (gs.eliminated[s]) continue;
