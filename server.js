@@ -225,6 +225,8 @@ function tick(room) {
   const gs = room.game;
   if (!gs || gs.gameOver) return;
   gs.tick++;
+  // М'ячі надсилаємо тільки 20 разів/сек (кожен 3-й тік) — менше стрибків на клієнті
+  const sendBalls = (gs.tick % 3 === 0);
   try {
     for (const s of SLOTS) {
       if (gs.eliminated[s]) continue;
@@ -368,18 +370,17 @@ function tick(room) {
       }
       if (gs.gameOver) { broadcastState(room); return; }
     }
-    broadcastState(room);
+    broadcastState(room, sendBalls);
   } catch(e) {
     console.error('TICK ERROR:', e.message, e.stack?.split('\n')[1]);
   }
 }
 
-function broadcastState(room) {
+function broadcastState(room, sendBalls=true) {
   const gs = room.game;
   if (!gs) return;
   io.to(room.id).emit('gs', {
-    balls: gs.balls.map(b=>({x:Math.round(b.x*10)/10,y:Math.round(b.y*10)/10,vx:Math.round(b.vx*100)/100,vy:Math.round(b.vy*100)/100,id:b.id})),
-    respawns: gs.respawns.map(r=>({timer:Math.round(r.timer),vx:r.vx,vy:r.vy})),
+    ...(sendBalls ? {balls:gs.balls.map(b=>({x:Math.round(b.x*10)/10,y:Math.round(b.y*10)/10,vx:Math.round(b.vx*100)/100,vy:Math.round(b.vy*100)/100,id:b.id})),respawns:gs.respawns.map(r=>({timer:Math.round(r.timer),vx:r.vx,vy:r.vy}))} : {}),
     p: [Math.round(gs.paddles[0]),Math.round(gs.paddles[1]),Math.round(gs.paddles[2]),Math.round(gs.paddles[3])],
     e: [Math.round(gs.energy[0]*100),Math.round(gs.energy[1]*100),Math.round(gs.energy[2]*100),Math.round(gs.energy[3]*100)],
     f: [
