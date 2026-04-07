@@ -651,3 +651,138 @@ io.on('connection', (socket) => {
 });
 
 httpServer.listen(PORT, () => console.log(`Server on port ${PORT}, ${TICK_RATE} ticks/sec`));
+
+// ══════════════════════════════════════════════════════
+// DAILY RATING REWARDS — Firebase Admin + cron
+// ══════════════════════════════════════════════════════
+let admin = null;
+let db = null;
+
+// Ініціалізуємо Firebase Admin якщо є змінні середовища
+try {
+  admin = require('firebase-admin');
+  const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
+    ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+    : null;
+
+  if (serviceAccount && !admin.apps.length) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      databaseURL: 'https://crazy-footbal-default-rtdb.europe-west1.firebasedatabase.app',
+    });
+    db = admin.firestore();
+    console.log('Firebase Admin initialized');
+  }
+} catch(e) {
+  console.log('Firebase Admin not available:', e.message);
+}
+
+const DAILY_REWARDS = { 1: 100, 2: 50, 3: 30 };
+
+async function processDailyRewards() {
+  if (!db) { console.log('No Firebase db — skipping daily rewards'); return; }
+
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  console.log('Processing daily rewards for:', yesterday);
+
+  try {
+    // Завантажуємо гравців які грали вчора
+    const snapshot = await db.collection('users')
+      .where('ratingDate', '==', yesterday)
+      .get();
+
+    if (snapshot.empty) {
+      console.log('No players for', yesterday);
+      return;
+    }
+
+    // Формуємо список з денним приростом
+    const players = [];
+    snapshot.forEach(doc => {
+      const d = doc.data();
+      if (d.ratingToday && d.ratingToday > 0) {
+        players.push({ uid: doc.id, nick: d.nickname || 'Гравець', ratingToday: d.ratingToday });
+      }
+    });
+
+    if (!players.length) { console.log('No active players'); return; }
+
+    players.sort((a, b) => b.ratingToday - a.ratingToday);
+    const top3 = players.slice(0, 3);
+    console.log('Top 3:', top3.map(p => p.nick + ': +' + p.ratingToday));
+
+    // Зберігаємо знімок дня
+    await db.collection('dailySnapshots').doc(yesterday).set({
+      date: yesterday,
+      top3,
+      totalPlayers: players.length,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Нараховуємо нагороди
+    const batch = db.batch();
+    for (let i = 0; i < top3.length; i++) {
+      const player = top3[i];
+      const place = i + 1;
+      const gold = DAILY_REWARDS[place];
+      if (!gold) continue;
+
+      // Перевіряємо чи вже отримував
+      const existing = await db.collection('users').doc(player.uid)
+        .collection('notifications')
+        .where('type', '==', 'daily_rating_reward')
+        .where('rewardDate', '==', yesterday)
+        .limit(1).get();
+      if (!existing.empty) continue;
+
+      const placeEmojis = { 1: '🥇', 2: '🥈', 3: '🥉' };
+
+      // Нараховуємо золото
+      batch.update(db.collection('users').doc(player.uid), {
+        gold: admin.firestore.FieldValue.increment(gold),
+      });
+
+      // Сповіщення
+      batch.set(db.collection('users').doc(player.uid).collection('notifications').doc(), {
+        type: 'daily_rating_reward',
+        rewardDate: yesterday,
+        place,
+        goldAmount: gold,
+        text: placeEmojis[place] + ' ' + place + '-е місце денного рейтингу (' + yesterday + ')! +🪙' + gold + ' золота нараховано',
+        read: false,
+        resolved: true,
+        date: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      console.log('Rewarded:', player.nick, 'place', place, 'gold', gold);
+    }
+
+    await batch.commit();
+    console.log('Daily rewards done!');
+
+  } catch(e) {
+    console.error('processDailyRewards error:', e.message);
+  }
+}
+
+// ── Cron: запускаємо о 00:01 щодня ──
+function scheduleDailyRewards() {
+  const now = new Date();
+  // Час до наступної 00:01 UTC
+  const next = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1, // завтра
+    0, 1, 0 // 00:01:00
+  ));
+  const msUntilNext = next.getTime() - now.getTime();
+  console.log('Next daily rewards in:', Math.round(msUntilNext / 1000 / 60), 'minutes');
+
+  setTimeout(() => {
+    processDailyRewards();
+    // Після першого запуску — повторюємо кожні 24 години
+    setInterval(processDailyRewards, 24 * 60 * 60 * 1000);
+  }, msUntilNext);
+}
+
+scheduleDailyRewards();
