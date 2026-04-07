@@ -549,9 +549,21 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('input', ({ left, right, boost }) => {
+  socket.on('input', ({ left, right, boost, hist }) => {
     if (!myRoom || !myRoom.players[socket.id]) return;
-    myRoom.players[socket.id].input = { left, right, boost };
+    const player = myRoom.players[socket.id];
+
+    // ── Input buffering: якщо є hist — застосовуємо пропущені inputs ──
+    // hist = масив останніх inputs включно з поточним
+    // Якщо поточний пакет дійшов а попередній — ні, hist відновлює пропущені дії
+    if (hist && hist.length > 1 && player._lastInputSeq !== undefined) {
+      // Застосовуємо boost з будь-якого пакету в hist (щоб не пропустити натискання)
+      const anyBoost = hist.some(h => h.boost);
+      player.input = { left, right, boost: boost || anyBoost };
+    } else {
+      player.input = { left, right, boost };
+    }
+    player._lastInputSeq = (player._lastInputSeq || 0) + 1;
   });
 
   socket.on('mm:cancel', () => leave());
