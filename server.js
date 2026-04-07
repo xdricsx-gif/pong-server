@@ -380,6 +380,7 @@ function broadcastState(room, sendBalls=true) {
   const gs = room.game;
   if (!gs) return;
   io.to(room.id).emit('gs', {
+    seq: gs.tick, // ── номер тіку для rollback ──
     ...(sendBalls ? {balls:gs.balls.map(b=>({x:Math.round(b.x*10)/10,y:Math.round(b.y*10)/10,vx:Math.round(b.vx*100)/100,vy:Math.round(b.vy*100)/100,id:b.id})),respawns:gs.respawns.map(r=>({timer:Math.round(r.timer),vx:r.vx,vy:r.vy}))} : {}),
     p: [Math.round(gs.paddles[0]),Math.round(gs.paddles[1]),Math.round(gs.paddles[2]),Math.round(gs.paddles[3])],
     e: [Math.round(gs.energy[0]*100),Math.round(gs.energy[1]*100),Math.round(gs.energy[2]*100),Math.round(gs.energy[3]*100)],
@@ -443,7 +444,12 @@ function endGame(room, winnerSlot) {
 
 function startGame(room) {
   room.status = 'playing';
-  fillBots(room);
+  // Боти тільки для тренування — в рейтингових грають тільки реальні гравці
+  if (Object.values(room.players).some(p => p.trainingMode)) {
+    fillBots(room);
+  } else {
+    room.bots = {}; // очищаємо ботів для ranked
+  }
   room.game = createGameState(room);
   io.to(room.id).emit('game:start', { players: buildPlayers(room), mySlot: null });
   for (const [sid, player] of Object.entries(room.players)) {
@@ -502,9 +508,14 @@ io.on('connection', (socket) => {
     socket.emit('mm:joined', { mySlot, roomId: room.id });
     broadcastLobby(room);
     const count = Object.keys(room.players).length;
-    if (count === 1) { fillBots(room); broadcastLobby(room); startCountdown(room); }
-    else if (count >= 4) { if (room.countdownTimer) { clearInterval(room.countdownTimer); room.countdownTimer = null; } startGame(room); }
-    else { fillBots(room); broadcastLobby(room); startCountdown(room); }
+    // Ranked — без ботів, чекаємо реальних гравців
+    if (count >= 4) {
+      if (room.countdownTimer) { clearInterval(room.countdownTimer); room.countdownTimer = null; }
+      startGame(room);
+    } else {
+      broadcastLobby(room);
+      startCountdown(room); // таймер 10с — якщо не набралось 4, стартуємо з тими хто є
+    }
   });
 
   socket.on('rejoin', ({ roomId, slot, nick, rating, uid, paddleStats }) => {
