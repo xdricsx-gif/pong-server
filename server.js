@@ -561,21 +561,48 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('input', ({ left, right, boost, hist }) => {
+  socket.on('input', ({ left, right, boost, hist, pos }) => {
     if (!myRoom || !myRoom.players[socket.id]) return;
     const player = myRoom.players[socket.id];
+    const gs = myRoom.game;
 
-    // ── Input buffering: якщо є hist — застосовуємо пропущені inputs ──
-    // hist = масив останніх inputs включно з поточним
-    // Якщо поточний пакет дійшов а попередній — ні, hist відновлює пропущені дії
-    if (hist && hist.length > 1 && player._lastInputSeq !== undefined) {
-      // Застосовуємо boost з будь-якого пакету в hist (щоб не пропустити натискання)
-      const anyBoost = hist.some(h => h.boost);
-      player.input = { left, right, boost: boost || anyBoost };
-    } else {
-      player.input = { left, right, boost };
-    }
+    // ── Input buffering ──
+    const anyBoost = hist && hist.length > 1 ? hist.some(h => h.boost) : false;
+    player.input = { left, right, boost: boost || anyBoost };
     player._lastInputSeq = (player._lastInputSeq || 0) + 1;
+
+    // ── Server follows client position ──
+    // Приймаємо позицію від клієнта якщо вона в межах допустимого
+    if (pos !== undefined && gs && !gs.eliminated[player.slot]) {
+      const slot = player.slot;
+      const view = SLOT_VIEW[slot];
+      const isHoriz = view === 'top' || view === 'bottom';
+      const pStats = player.paddleStats || {};
+      const pW = pStats.w || PL;
+      const half = pW / 2;
+      const mn = C + half;
+      const mx = (isHoriz ? W : H) - C - half;
+
+      // Клампуємо в межі поля
+      const clampedPos = Math.max(mn, Math.min(mx, pos));
+      const serverPos = gs.paddles[slot];
+      const diff = Math.abs(clampedPos - serverPos);
+
+      // Максимальне допустиме відхилення за тік:
+      // швидкість ракетки × кількість тіків між пакетами (~3) + запас
+      const maxSpeed = pStats.spd || PS;
+      const MAX_DRIFT = maxSpeed * 6 + 20; // ~40px при нормальній грі
+
+      if (diff <= MAX_DRIFT) {
+        // В межах норми — сервер приймає позицію клієнта
+        gs.paddles[slot] = clampedPos;
+      } else {
+        // Аномалія — плавно підтягуємо серверну позицію до клієнтської
+        // але не телепортуємо різко
+        gs.paddles[slot] += (clampedPos - serverPos) * 0.3;
+        console.log(`Paddle anomaly slot${slot}: diff=${diff.toFixed(0)}px`);
+      }
+    }
   });
 
   socket.on('mm:cancel', () => leave());
