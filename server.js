@@ -462,6 +462,9 @@ function tick(room) {
   }
 }
 
+// ── Серверна статистика розсинхронів ──
+const _srvStats = {};
+
 function broadcastState(room, sendBalls=true) {
   const gs = room.game;
   if (!gs) return;
@@ -785,6 +788,22 @@ io.on('connection', (socket) => {
 });
 
 httpServer.listen(PORT, () => console.log(`Server on port ${PORT}, ${TICK_RATE} ticks/sec`));
+
+// ── Лог активних кімнат кожні 30с ──
+setInterval(() => {
+  if (rooms.size === 0) return;
+  for (const [rid, room] of rooms) {
+    if (!room.game || room.game.gameOver) continue;
+    const gs = room.game;
+    const players = Object.values(room.players).map(p =>
+      `slot${p.slot}:${p.nick}(ping?)`
+    ).join(', ');
+    const balls = gs.balls.map(b =>
+      `[${b.x.toFixed(0)},${b.y.toFixed(0)} v:${b.vx.toFixed(2)},${b.vy.toFixed(2)}]`
+    ).join(' ');
+    console.log(`[ROOM ${rid.slice(-4)}] tick=${gs.tick} | ${players} | balls: ${balls}`);
+  }
+}, 30000);
 
 // ══════════════════════════════════════════════════════
 // DAILY RATING REWARDS — Firebase Admin + cron
