@@ -322,6 +322,11 @@ function tick(room) {
     for (let bi = gs.balls.length - 1; bi >= 0; bi--) {
       const ball = gs.balls[bi];
       ball.x += ball.vx; ball.y += ball.vy;
+    // Округлення до 3 знаків — зменшує float drift між клієнтом і сервером
+    ball.x=Math.round(ball.x*1000)/1000;
+    ball.y=Math.round(ball.y*1000)/1000;
+    ball.vx=Math.round(ball.vx*1000)/1000;
+    ball.vy=Math.round(ball.vy*1000)/1000;
       for (const s of SLOTS) {
         if (gs.eliminated[s]) continue;
         applyFFBall(gs, s, ball);
@@ -389,6 +394,18 @@ function broadcastState(room, sendBalls=true) {
       gs.fields[1].active ? Math.round(getFFRadius(gs.fields[1])) : 0,
       gs.fields[2].active ? Math.round(getFFRadius(gs.fields[2])) : 0,
       gs.fields[3].active ? Math.round(getFFRadius(gs.fields[3])) : 0,
+    ],
+    ft: [ // field timer — скільки ms поле вже активне
+      gs.fields[0].active ? Math.round(gs.fields[0].t) : 0,
+      gs.fields[1].active ? Math.round(gs.fields[1].t) : 0,
+      gs.fields[2].active ? Math.round(gs.fields[2].t) : 0,
+      gs.fields[3].active ? Math.round(gs.fields[3].t) : 0,
+    ],
+    fmr: [ // field maxR — прокачаний радіус
+      gs.fields[0].maxR || FR,
+      gs.fields[1].maxR || FR,
+      gs.fields[2].maxR || FR,
+      gs.fields[3].maxR || FR,
     ],
     el: [gs.eliminated[0]?1:0,gs.eliminated[1]?1:0,gs.eliminated[2]?1:0,gs.eliminated[3]?1:0],
     lv: [gs.lives[0],gs.lives[1],gs.lives[2],gs.lives[3]],
