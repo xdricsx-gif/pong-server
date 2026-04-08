@@ -307,10 +307,40 @@ function tick(room) {
       if (inp.left)  gs.paddles[s] = Math.max(mn, gs.paddles[s] - pSpd);
       if (inp.right) gs.paddles[s] = Math.min(mx, gs.paddles[s] + pSpd);
       if (inp.boost && !gs.fields[s].active && gs.energy[s] >= EPU) {
-        gs.fields[s].active = true; gs.fields[s].t = 0; gs.fields[s].r = 0;
+        gs.fields[s].active = true;
+        gs.fields[s].r = 0;
         gs.fields[s].maxR = pStats?.fr || FR;
         gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
+
+        // Client-authoritative boost position:
+        // Якщо клієнт надіслав позицію при активації — перевіряємо чи надійна
+        if (inp.boostPos !== undefined) {
+          const view = SLOT_VIEW[s];
+          const isHoriz = view === 'top' || view === 'bottom';
+          const pW = pStats?.w || PL;
+          const half = pW / 2;
+          const mn = C + half;
+          const mx = (isHoriz ? W : H) - C - half;
+          const clampedPos = Math.max(mn, Math.min(mx, inp.boostPos));
+          const serverPos = gs.paddles[s];
+          const maxSpeed = pStats?.spd || PS;
+          // Максимальний можливий рух за час пінгу (~5 тіків)
+          const maxDrift = maxSpeed * 8;
+          if (Math.abs(clampedPos - serverPos) <= maxDrift) {
+            // Надійно — беремо позицію клієнта
+            gs.paddles[s] = clampedPos;
+            gs.fields[s].t = TICK_MS * 3; // компенсуємо мережеву затримку (~3 тіки)
+          } else {
+            // Підозріло — серверна позиція, без компенсації
+            gs.fields[s].t = 0;
+            console.log(`Suspicious boost pos: slot${s} diff=${Math.abs(clampedPos-serverPos).toFixed(0)}px`);
+          }
+        } else {
+          gs.fields[s].t = 0;
+        }
+
         inp.boost = false;
+        inp.boostPos = undefined;
       }
     }
     // ── Відключені гравці — ракетка стоїть (input не надходить, нічого не робимо) ──
@@ -625,14 +655,22 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('input', ({ left, right, boost, hist, pos }) => {
+  socket.on('input', ({ left, right, boost, hist, pos, boostPos }) => {
     if (!myRoom || !myRoom.players[socket.id]) return;
     const player = myRoom.players[socket.id];
     const gs = myRoom.game;
 
     // ── Input buffering ──
     const anyBoost = hist && hist.length > 1 ? hist.some(h => h.boost) : false;
-    player.input = { left, right, boost: boost || anyBoost };
+    const finalBoost = boost || anyBoost;
+    player.input = { left, right, boost: finalBoost };
+    // Зберігаємо позицію при активації поля
+    if (finalBoost && !player.input._boostSaved) {
+      player.input.boostPos = boostPos;
+      player.input._boostSaved = true;
+    } else if (!finalBoost) {
+      player.input._boostSaved = false;
+    }
     player._lastInputSeq = (player._lastInputSeq || 0) + 1;
 
     // ── Server follows client position ──
