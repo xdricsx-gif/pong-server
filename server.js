@@ -113,22 +113,26 @@ function applyFFBall(gs, s, ball) {
   if (currentR < 2) return false;
   const maxR = f.maxR || FR;
   if (dist > maxR + BR) return false;
+  // Нормаль: від центру поля ДО м'яча (виштовхує назовні)
   let nx, ny;
-  if (dist > 0.5) { nx = dx/dist; ny = dy/dist; }
+  if (dist > 1.0) { nx = dx/dist; ny = dy/dist; }
   else {
+    // М'яч точно в центрі — відбиваємо від ракетки
     const view = SLOT_VIEW[s];
-    nx = view==='bottom'?0:view==='top'?0:view==='left'?1:-1;
+    nx = view==='left'?1:view==='right'?-1:0;
     ny = view==='bottom'?-1:view==='top'?1:0;
+    if(nx===0&&ny===0) ny=-1;
   }
   const dot = ball.vx*nx + ball.vy*ny;
-  if (dot > 0 && dist > currentR*0.3) return false;
+  // Відбиваємо тільки якщо м'яч летить ВСЕРЕДИНУ поля
+  if (dot >= 0) return false;
   const speed = Math.min(Math.hypot(ball.vx,ball.vy)*BMULT, SMAX);
   ball.vx -= 2*dot*nx; ball.vy -= 2*dot*ny;
   const actual = Math.hypot(ball.vx, ball.vy);
   if (actual > 0.01) { ball.vx = ball.vx/actual*speed; ball.vy = ball.vy/actual*speed; }
-  const pushR = Math.max(currentR, dist);
-  ball.x = fcx + nx*(pushR + BR + 1);
-  ball.y = fcy + ny*(pushR + BR + 1);
+  // Виштовхуємо точно на край поля
+  ball.x = fcx + nx*(currentR + BR + 1);
+  ball.y = fcy + ny*(currentR + BR + 1);
   return true;
 }
 
