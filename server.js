@@ -121,7 +121,7 @@ function applyFFBall(gs, s, ball) {
     ny = view==='bottom'?-1:view==='top'?1:0;
   }
   const dot = ball.vx*nx + ball.vy*ny;
-  if (dot > 0 && dist > currentR*0.5) return false;
+  if (dot > 0 && dist > currentR*0.3) return false;
   const speed = Math.min(Math.hypot(ball.vx,ball.vy)*BMULT, SMAX);
   ball.vx -= 2*dot*nx; ball.vy -= 2*dot*ny;
   const actual = Math.hypot(ball.vx, ball.vy);
