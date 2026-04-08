@@ -179,7 +179,7 @@ function buildPlayers(room) {
   for (const s of SLOTS) {
     const p = Object.values(room.players).find(p => p.slot === s);
     if (p) {
-      res[s] = { nick: p.nick, rating: p.rating, isBot: false, wins: p.wins||0, games: p.games||0 };
+      res[s] = { nick: p.nick, rating: p.rating, isBot: false, wins: p.wins||0, games: p.games||0, avatarId: p.avatarId||0 };
     } else if (room._disconnected && room._disconnected[s]) {
       // ── Відключений гравець — показуємо як гравця (не бота) але з позначкою ──
       res[s] = { nick: room._disconnected[s].nick, rating: room._disconnected[s].rating, isBot: false, disconnected: true, wins: 0, games: 0 };
@@ -225,8 +225,7 @@ function tick(room) {
   const gs = room.game;
   if (!gs || gs.gameOver) return;
   gs.tick++;
-  // М'ячі надсилаємо 20 разів/сек (кожен 3-й тік)
-  const sendBalls = (gs.tick % 3 === 0);
+  const sendBalls = true; // Lockstep: надсилаємо стан кожен тік
   try {
     for (const s of SLOTS) {
       if (gs.eliminated[s]) continue;
@@ -380,8 +379,9 @@ function broadcastState(room, sendBalls=true) {
   const gs = room.game;
   if (!gs) return;
   io.to(room.id).emit('gs', {
-    seq: gs.tick, // ── номер тіку для rollback ──
-    ...(sendBalls ? {balls:gs.balls.map(b=>({x:Math.round(b.x*10)/10,y:Math.round(b.y*10)/10,vx:Math.round(b.vx*100)/100,vy:Math.round(b.vy*100)/100,id:b.id})),respawns:gs.respawns.map(r=>({timer:Math.round(r.timer),vx:r.vx,vy:r.vy}))} : {}),
+    seq: gs.tick,
+    balls: gs.balls.map(b=>({x:Math.round(b.x*10)/10,y:Math.round(b.y*10)/10,vx:Math.round(b.vx*100)/100,vy:Math.round(b.vy*100)/100,id:b.id})),
+    respawns: gs.respawns.map(r=>({timer:Math.round(r.timer),vx:r.vx,vy:r.vy})),
     p: [Math.round(gs.paddles[0]),Math.round(gs.paddles[1]),Math.round(gs.paddles[2]),Math.round(gs.paddles[3])],
     e: [Math.round(gs.energy[0]*100),Math.round(gs.energy[1]*100),Math.round(gs.energy[2]*100),Math.round(gs.energy[3]*100)],
     f: [
@@ -482,7 +482,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('mm:join', ({ nick, rating, uid, wins, games, paddleStats, trainingMode }) => {
+  socket.on('mm:join', ({ nick, rating, uid, wins, games, paddleStats, trainingMode, avatarId }) => {
     if(trainingMode){
       const tRoom = createRoom('training_'+socket.id);
       rooms.set(tRoom.id, tRoom);
@@ -502,7 +502,7 @@ io.on('connection', (socket) => {
       if (botSlot !== undefined) { delete room.bots[botSlot]; mySlot = botSlot; }
       else { socket.emit('mm:error', 'Кімната повна'); return; }
     }
-    room.players[socket.id] = { slot: mySlot, nick, rating, uid, wins: wins||0, games: games||0, input: {},
+    room.players[socket.id] = { slot: mySlot, nick, rating, uid, wins: wins||0, games: games||0, avatarId: avatarId||0, input: {},
       paddleStats: paddleStats || { spd:3.375, w:54, fr:54, bm:2.32, er:1.0, fd:1.0 } };
     socket.join(room.id);
     socket.emit('mm:joined', { mySlot, roomId: room.id });
