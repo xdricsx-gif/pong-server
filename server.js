@@ -123,14 +123,55 @@ function applyFFBall(gs, s, ball) {
     ny = view==='bottom'?-1:view==='top'?1:0;
     if(nx===0&&ny===0) ny=-1;
   }
+  // ── Continuous Collision Detection ──
+  // Перевіряємо чи перетинає шлях м'яча (oldX→ball.x) межу поля
+  // Зона виявлення збільшена на швидкість м'яча
+  const vspeed = Math.hypot(ball.vx, ball.vy);
+  const detectR = maxR + BR + vspeed;
+  if (dist > detectR) return false;
+
+  // Якщо м'яч вже всередині поля і летить назовні — не чіпаємо
   const dot = ball.vx*nx + ball.vy*ny;
-  // Відбиваємо тільки якщо м'яч летить ВСЕРЕДИНУ поля
-  if (dot >= 0) return false;
-  const speed = Math.min(Math.hypot(ball.vx,ball.vy)*BMULT, SMAX);
-  ball.vx -= 2*dot*nx; ball.vy -= 2*dot*ny;
+  if (dot >= 0 && dist <= currentR) return false;
+
+  // CCD: знаходимо точку перетину відрізка шляху з колом поля
+  // Відрізок: P = (oldX, oldY) → (ball.x, ball.y)
+  // Коло: центр (fcx, fcy), радіус currentR
+  const oldX = ball.x - ball.vx;
+  const oldY = ball.y - ball.vy;
+  const rx = oldX - fcx, ry = oldY - fcy;
+  const dvx = ball.vx, dvy = ball.vy;
+  const a = dvx*dvx + dvy*dvy;
+  const b = 2*(rx*dvx + ry*dvy);
+  const c = rx*rx + ry*ry - (currentR+BR)*(currentR+BR);
+  const discriminant = b*b - 4*a*c;
+
+  if (discriminant >= 0 && a > 0.0001) {
+    // Є перетин — знаходимо найближчу точку входу
+    const t = (-b - Math.sqrt(discriminant)) / (2*a);
+    if (t >= 0 && t <= 1) {
+      // Переміщуємо м'яч до точки перетину
+      ball.x = oldX + dvx*t;
+      ball.y = oldY + dvy*t;
+      // Перераховуємо нормаль в точці перетину
+      const hdx = ball.x - fcx, hdy = ball.y - fcy;
+      const hdist = Math.hypot(hdx, hdy);
+      if (hdist > 0.5) { nx = hdx/hdist; ny = hdy/hdist; }
+    }
+  } else if (dist > currentR + BR) {
+    // Немає перетину і м'яч зовні — не чіпаємо
+    return false;
+  }
+
+  // Відбиваємо тільки якщо летить всередину
+  const dot2 = ball.vx*nx + ball.vy*ny;
+  if (dot2 >= 0) return false;
+
+  const speed = Math.min(vspeed*BMULT, SMAX);
+  ball.vx -= 2*dot2*nx; ball.vy -= 2*dot2*ny;
   const actual = Math.hypot(ball.vx, ball.vy);
   if (actual > 0.01) { ball.vx = ball.vx/actual*speed; ball.vy = ball.vy/actual*speed; }
-  // Виштовхуємо точно на край поля
+  // Виштовхуємо на край поля
   ball.x = fcx + nx*(currentR + BR + 1);
   ball.y = fcy + ny*(currentR + BR + 1);
   return true;
