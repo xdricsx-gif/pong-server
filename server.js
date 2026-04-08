@@ -176,6 +176,11 @@ function applyFFBall(gs, s, ball) {
   if (actual > 0.01) { ball.vx = ball.vx/actual*speed; ball.vy = ball.vy/actual*speed; }
   ball.x = fcx + nx*(currentR + BR + 2);
   ball.y = fcy + ny*(currentR + BR + 2);
+  // Округлення після відбиття від поля — зменшує float drift між клієнтом і сервером
+  ball.x = Math.round(ball.x*100)/100;
+  ball.y = Math.round(ball.y*100)/100;
+  ball.vx = Math.round(ball.vx*100)/100;
+  ball.vy = Math.round(ball.vy*100)/100;
   return true;
 }
 
