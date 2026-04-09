@@ -113,11 +113,12 @@ function applyFFBall(gs, s, ball) {
   // Фізика по maxR — усуває розсинхрон при розширенні
   const currentR = maxR;
   if (dist > maxR + BR + 8) return false;
-  // Нормаль: від центру поля ДО м'яча (виштовхує назовні)
+  // Нормаль: від центру поля ДО м'яча — округлюємо для синхронізації
   let nx, ny;
-  if (dist > 1.0) { nx = dx/dist; ny = dy/dist; }
-  else {
-    // М'яч точно в центрі — відбиваємо від ракетки
+  if (dist > 1.0) {
+    nx = Math.round(dx/dist*100)/100;
+    ny = Math.round(dy/dist*100)/100;
+  } else {
     const view = SLOT_VIEW[s];
     nx = view==='left'?1:view==='right'?-1:0;
     ny = view==='bottom'?-1:view==='top'?1:0;
