@@ -410,9 +410,10 @@ function tick(room) {
     ball.y=Math.round(ball.y*1000)/1000;
     ball.vx=Math.round(ball.vx*1000)/1000;
     ball.vy=Math.round(ball.vy*1000)/1000;
+      let _ffHit=false;
       for (const s of SLOTS) {
         if (gs.eliminated[s]) continue;
-        applyFFBall(gs, s, ball);
+        if (!_ffHit && applyFFBall(gs, s, ball)) _ffHit=true;
       }
       resolveChamfersBall(ball);
       clampBallObj(ball);
