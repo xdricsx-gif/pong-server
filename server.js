@@ -715,14 +715,14 @@ io.on('connection', (socket) => {
       }
 
       // Якщо поле активне — використовуємо fieldPos для точної синхронізації відбиття
-      // Це гарантує що центр поля однаковий на клієнті і сервері
-      if (inp.fieldPos !== undefined && gs.fields[slot] && gs.fields[slot].active) {
-        const fpClamped = Math.max(mn, Math.min(mx, inp.fieldPos));
+      const _inp = player.input;
+      if (_inp && _inp.fieldPos !== undefined && gs.fields[slot] && gs.fields[slot].active) {
+        const fpClamped = Math.max(mn, Math.min(mx, _inp.fieldPos));
         const fpDiff = Math.abs(fpClamped - serverPos);
         if (fpDiff <= MAX_DRIFT) {
           gs.paddles[slot] = fpClamped;
         }
-        inp.fieldPos = undefined;
+        _inp.fieldPos = undefined;
       }
     }
   });
