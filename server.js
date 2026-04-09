@@ -681,6 +681,8 @@ io.on('connection', (socket) => {
     // ── Input buffering ──
     const anyBoost = hist && hist.length > 1 ? hist.some(h => h.boost) : false;
     const finalBoost = boost || anyBoost;
+    // Якщо поточний pos відсутній але є в hist — беремо останній
+    const effectivePos = pos !== undefined ? pos : (hist && hist.length > 0 ? hist[hist.length-1].pos : undefined);
     player.input = { left, right, boost: finalBoost, fieldPos };
     // Зберігаємо позицію при активації поля
     if (finalBoost && !player.input._boostSaved) {
@@ -693,7 +695,8 @@ io.on('connection', (socket) => {
 
     // ── Server follows client position ──
     // Приймаємо позицію від клієнта якщо вона в межах допустимого
-    if (pos !== undefined && gs && !gs.eliminated[player.slot]) {
+    if (effectivePos !== undefined && gs && !gs.eliminated[player.slot]) {
+      const pos = effectivePos; // використовуємо ефективний pos
       const slot = player.slot;
       const view = SLOT_VIEW[slot];
       const isHoriz = view === 'top' || view === 'bottom';
