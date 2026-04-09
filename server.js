@@ -109,10 +109,10 @@ function applyFFBall(gs, s, ball) {
   const fcx = p.x+p.w/2, fcy = p.y+p.h/2;
   const dx = ball.x-fcx, dy = ball.y-fcy;
   const dist = Math.hypot(dx,dy);
-  const currentR = getFFRadius(f);
-  if (currentR < 2) return false;
   const maxR = f.maxR || FR;
-  if (dist > maxR + BR) return false;
+  // Фізика по maxR — усуває розсинхрон при розширенні
+  const currentR = maxR;
+  if (dist > maxR + BR + 8) return false;
   // Нормаль: від центру поля ДО м'яча (виштовхує назовні)
   let nx, ny;
   if (dist > 1.0) { nx = dx/dist; ny = dy/dist; }
