@@ -105,6 +105,9 @@ function getFFRadius(f) {
 function applyFFBall(gs, s, ball) {
   const f = gs.fields[s];
   if (!f || !f.active) return false;
+  // Cooldown: якщо цей м'яч нещодавно відбився від поля s — пропускаємо
+  const _cdKey = 'ff_cd_' + s;
+  if (ball[_cdKey] && ball[_cdKey] > 0) { ball[_cdKey]--; return false; }
   const p = slotToPaddle(s, gs.paddles[s], gs, null);
   const fcx = p.x+p.w/2, fcy = p.y+p.h/2;
   const dx = ball.x-fcx, dy = ball.y-fcy;
@@ -177,6 +180,7 @@ function applyFFBall(gs, s, ball) {
   if (actual > 0.01) { ball.vx = ball.vx/actual*speed; ball.vy = ball.vy/actual*speed; }
   ball.x = fcx + nx*(maxR + BR + 12);
   ball.y = fcy + ny*(maxR + BR + 12);
+  ball['ff_cd_' + s] = 8;
   // Округлення після відбиття від поля — зменшує float drift між клієнтом і сервером
   // Округлення до 1 знаку — усуває float drift після відбиття від поля
   ball.x = Math.round(ball.x*10)/10;
