@@ -175,8 +175,8 @@ function applyFFBall(gs, s, ball) {
   ball.vx -= 2*dot2*nx; ball.vy -= 2*dot2*ny;
   const actual = Math.hypot(ball.vx, ball.vy);
   if (actual > 0.01) { ball.vx = ball.vx/actual*speed; ball.vy = ball.vy/actual*speed; }
-  ball.x = fcx + nx*(currentR + BR + 2);
-  ball.y = fcy + ny*(currentR + BR + 2);
+  ball.x = fcx + nx*(maxR + BR + 12);
+  ball.y = fcy + ny*(maxR + BR + 12);
   // Округлення після відбиття від поля — зменшує float drift між клієнтом і сервером
   // Округлення до 1 знаку — усуває float drift після відбиття від поля
   ball.x = Math.round(ball.x*10)/10;
