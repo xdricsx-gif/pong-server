@@ -178,6 +178,16 @@ function applyFFBall(gs, s, ball) {
   ball.vx -= 2*dot2*nx; ball.vy -= 2*dot2*ny;
   const actual = Math.hypot(ball.vx, ball.vy);
   if (actual > 0.01) { ball.vx = ball.vx/actual*speed; ball.vy = ball.vy/actual*speed; }
+  // Мінімальний кут відбиття ≥30° від межі поля
+  const MIN_NORM = 0.5;
+  const normComp = ball.vx*nx + ball.vy*ny;
+  if(normComp < MIN_NORM * speed){
+    const boost = MIN_NORM * speed - normComp;
+    ball.vx += Math.round(nx*boost*100)/100;
+    ball.vy += Math.round(ny*boost*100)/100;
+    const actual2 = Math.hypot(ball.vx,ball.vy);
+    if(actual2>0.01){ball.vx=Math.round(ball.vx/actual2*speed*100)/100;ball.vy=Math.round(ball.vy/actual2*speed*100)/100;}
+  }
   ball.x = fcx + nx*(maxR + BR + 12);
   ball.y = fcy + ny*(maxR + BR + 12);
   ball['ff_cd_' + s] = 8;
