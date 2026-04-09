@@ -667,7 +667,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('input', ({ left, right, boost, hist, pos, boostPos }) => {
+  socket.on('input', ({ left, right, boost, hist, pos, boostPos, fieldPos }) => {
     if (!myRoom || !myRoom.players[socket.id]) return;
     const player = myRoom.players[socket.id];
     const gs = myRoom.game;
@@ -675,7 +675,7 @@ io.on('connection', (socket) => {
     // ── Input buffering ──
     const anyBoost = hist && hist.length > 1 ? hist.some(h => h.boost) : false;
     const finalBoost = boost || anyBoost;
-    player.input = { left, right, boost: finalBoost };
+    player.input = { left, right, boost: finalBoost, fieldPos };
     // Зберігаємо позицію при активації поля
     if (finalBoost && !player.input._boostSaved) {
       player.input.boostPos = boostPos;
@@ -708,13 +708,21 @@ io.on('connection', (socket) => {
       const MAX_DRIFT = maxSpeed * 6 + 20; // ~40px при нормальній грі
 
       if (diff <= MAX_DRIFT) {
-        // В межах норми — сервер приймає позицію клієнта
         gs.paddles[slot] = clampedPos;
       } else {
-        // Аномалія — плавно підтягуємо серверну позицію до клієнтської
-        // але не телепортуємо різко
         gs.paddles[slot] += (clampedPos - serverPos) * 0.3;
         console.log(`Paddle anomaly slot${slot}: diff=${diff.toFixed(0)}px`);
+      }
+
+      // Якщо поле активне — використовуємо fieldPos для точної синхронізації відбиття
+      // Це гарантує що центр поля однаковий на клієнті і сервері
+      if (inp.fieldPos !== undefined && gs.fields[slot] && gs.fields[slot].active) {
+        const fpClamped = Math.max(mn, Math.min(mx, inp.fieldPos));
+        const fpDiff = Math.abs(fpClamped - serverPos);
+        if (fpDiff <= MAX_DRIFT) {
+          gs.paddles[slot] = fpClamped;
+        }
+        inp.fieldPos = undefined;
       }
     }
   });
