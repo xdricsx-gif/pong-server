@@ -557,7 +557,7 @@ function startGame(room) {
     room.bots = {}; // очищаємо ботів для ranked
   }
   room.game = createGameState(room);
-  io.to(room.id).emit('game:start', { players: buildPlayers(room), mySlot: null });
+  io.to(room.id).emit('game:start', { players: buildPlayers(room), mySlot: null, roomId: room.id });
   for (const [sid, player] of Object.entries(room.players)) {
     io.to(sid).emit('myslot', { mySlot: player.slot, roomId: room.id });
   }
