@@ -871,7 +871,7 @@ async function processDailyRewards() {
 
   try {
     // Завантажуємо гравців які грали вчора
-    const snapshot = await db.collection('users')
+    const snapshot = await db.collection('users_public')
       .where('ratingDate', '==', yesterday)
       .get();
 
@@ -912,7 +912,7 @@ async function processDailyRewards() {
       if (!gold) continue;
 
       // Перевіряємо чи вже отримував
-      const existing = await db.collection('users').doc(player.uid)
+      const existing = await db.collection('users_public').doc(player.uid)
         .collection('notifications')
         .where('type', '==', 'daily_rating_reward')
         .where('rewardDate', '==', yesterday)
@@ -922,12 +922,12 @@ async function processDailyRewards() {
       const placeEmojis = { 1: '🥇', 2: '🥈', 3: '🥉' };
 
       // Нараховуємо золото
-      batch.update(db.collection('users').doc(player.uid), {
+      batch.update(db.collection('users_public').doc(player.uid), {
         gold: admin.firestore.FieldValue.increment(gold),
       });
 
       // Сповіщення
-      batch.set(db.collection('users').doc(player.uid).collection('notifications').doc(), {
+      batch.set(db.collection('users_public').doc(player.uid).collection('notifications').doc(), {
         type: 'daily_rating_reward',
         rewardDate: yesterday,
         place,
