@@ -573,7 +573,16 @@ function startGame(room) {
     room.bots = {}; // очищаємо ботів для ranked
   }
   room.game = createGameState(room);
-  io.to(room.id).emit('game:start', { players: buildPlayers(room), mySlot: null, roomId: room.id });
+  // Paddle visual data — передається один раз при старті
+  const paddleVisuals = SLOTS.map(s => {
+    const p = Object.values(room.players).find(p => p.slot === s);
+    const stats = p?.paddleStats || room._disconnected?.[s]?.paddleStats || {};
+    return {
+      paddleId: stats.paddleId !== undefined ? stats.paddleId : 0,
+      avgUpgrade: stats.avgUpgrade !== undefined ? Math.round(stats.avgUpgrade * 100) : 0,
+    };
+  });
+  io.to(room.id).emit('game:start', { players: buildPlayers(room), mySlot: null, roomId: room.id, paddleVisuals });
   for (const [sid, player] of Object.entries(room.players)) {
     io.to(sid).emit('myslot', { mySlot: player.slot, roomId: room.id });
   }
