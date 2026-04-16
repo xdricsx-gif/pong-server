@@ -587,6 +587,13 @@ function startGame(room) {
   const paddleVisuals = SLOTS.map(s => {
     const p = Object.values(room.players).find(p => p.slot === s);
     const stats = p?.paddleStats || room._disconnected?.[s]?.paddleStats || {};
+    const isBot = !p && !room._disconnected?.[s] && room.bots?.[s];
+    if (isBot) {
+      // Боти мають рандомний клас ракетки для різноманіття
+      const botRating = room.bots[s].rating || 490;
+      const botPaddleId = Math.min(19, Math.floor(botRating / 80));
+      return { paddleId: botPaddleId, avgUpgrade: Math.floor(Math.random() * 60) };
+    }
     return {
       paddleId: stats.paddleId !== undefined ? stats.paddleId : 0,
       avgUpgrade: stats.avgUpgrade !== undefined ? Math.round(stats.avgUpgrade * 100) : 0,
