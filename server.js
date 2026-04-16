@@ -740,6 +740,71 @@ io.on('connection', (socket) => {
     if (uid) socket.uid = uid;
   });
 
+  // ── Обмін золото → срібло ──
+  socket.on('shop:exchange', async ({ rateId }) => {
+    if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
+    const RATES = [
+      { goldIn:1,   silverOut:100   },
+      { goldIn:5,   silverOut:500   },
+      { goldIn:10,  silverOut:1000  },
+      { goldIn:50,  silverOut:5000  },
+      { goldIn:100, silverOut:10000 },
+    ];
+    const rate = RATES[parseInt(rateId)];
+    if (!rate) return socket.emit('shop:error', { msg: 'invalid_rate' });
+    try {
+      const privRef = db.collection('users_private').doc(socket.uid);
+      const snap = await privRef.get();
+      if (!snap.exists) return socket.emit('shop:error', { msg: 'user_not_found' });
+      const priv = snap.data();
+      if ((priv.gold || 0) < rate.goldIn)
+        return socket.emit('shop:error', { msg: 'not_enough_gold' });
+      await privRef.update({
+        gold:   admin.firestore.FieldValue.increment(-rate.goldIn),
+        silver: admin.firestore.FieldValue.increment(rate.silverOut),
+      });
+      socket.emit('shop:exchanged', {
+        gold:   (priv.gold || 0) - rate.goldIn,
+        silver: (priv.silver || 0) + rate.silverOut,
+      });
+    } catch(e) {
+      console.error('shop:exchange', e.message);
+      socket.emit('shop:error', { msg: 'server_error' });
+    }
+  });
+
+  // ── Обробка незакінченого матчу (disconnect) ──
+  socket.on('shop:resolve_pending', async ({ type, aliveAtLastUpdate }) => {
+    if (!db || !socket.uid) return;
+    const RATE = [50, 20, 5, -20];
+    const XP   = [100, 50, 20, 0];
+    const alive = Math.max(1, Math.min(4, parseInt(aliveAtLastUpdate) || 4));
+    const place = Math.max(0, Math.min(3, alive - 1));
+    const delta = RATE[place] || -20;
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      const pubRef  = db.collection('users_public').doc(socket.uid);
+      const privRef = db.collection('users_private').doc(socket.uid);
+      const snap = await pubRef.get();
+      if (!snap.exists) return;
+      const pub = snap.data();
+      if (type === 'ranked') {
+        const newRating = Math.max(0, (pub.rating || 500) + delta);
+        await pubRef.update({
+          rating: newRating,
+          gamesPlayed: admin.firestore.FieldValue.increment(1),
+          ratingDate: today,
+          ratingToday: admin.firestore.FieldValue.increment(delta),
+        });
+        if (XP[place] > 0)
+          await privRef.update({ xp: admin.firestore.FieldValue.increment(XP[place]) });
+      }
+      socket.emit('shop:pending_resolved', { type, place, delta });
+    } catch(e) {
+      console.error('shop:resolve_pending', e.message);
+    }
+  });
+
   socket.on('mm:join', ({ nick, rating, uid, wins, games, paddleStats, trainingMode, avatarId }) => {
     if(uid) socket.uid = uid; // зберігаємо для shop handlers
     if(trainingMode){
