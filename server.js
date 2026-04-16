@@ -544,12 +544,69 @@ function getTrainingRewards(winnerSlot, mySlot) {
   return { xp: xpMap[place]||5, silver: silverMap[place]||5, place };
 }
 
+// ── Записуємо нагороди через Admin SDK (сервер авторитетний) ──
+async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining, trainingRewards) {
+  if (!db) return; // Admin SDK недоступний — клієнт запише сам (fallback)
+  const gs = room.game;
+  const today = new Date().toISOString().slice(0, 10);
+  const batch = db.batch();
+
+  for (const [sid, player] of Object.entries(room.players)) {
+    if (!player.uid || player.isBot) continue;
+    const s = player.slot;
+    const pubRef = db.collection('users_public').doc(player.uid);
+    const privRef = db.collection('users_private').doc(player.uid);
+
+    if (isTraining) {
+      // Тренування — XP і срібло
+      const tr = trainingRewards;
+      if (!tr) continue;
+      const place = s === winnerSlot ? 0 : 1;
+      const XP_MAP = [150, 75, 30, 0];
+      const SIL_MAP = [1500, 700, 200, 0];
+      const xp = XP_MAP[place] || 0;
+      const silver = SIL_MAP[place] || 0;
+      batch.update(privRef, {
+        xp: admin.firestore.FieldValue.increment(xp),
+        silver: admin.firestore.FieldValue.increment(silver),
+      });
+      batch.update(pubRef, { gamesPlayed: admin.firestore.FieldValue.increment(1) });
+    } else {
+      // Рейтингова гра — рейтинг, XP, gamesPlayed, wins
+      const delta = ratingDeltas[s] || -20;
+      const placeIdx = places.indexOf(s);
+      const XP_MAP = [100, 50, 20, 0];
+      const xp = XP_MAP[placeIdx] || 0;
+      const currentRating = player.rating || 500;
+      const newRating = Math.max(0, currentRating + delta);
+
+      const pubUpd = {
+        rating: newRating,
+        gamesPlayed: admin.firestore.FieldValue.increment(1),
+        ratingDate: today,
+      };
+      if (delta > 0) pubUpd.wins = admin.firestore.FieldValue.increment(1);
+      // ratingToday — накопичуємо за день
+      pubUpd.ratingToday = admin.firestore.FieldValue.increment(delta);
+
+      batch.update(pubRef, pubUpd);
+      if (xp > 0) batch.update(privRef, { xp: admin.firestore.FieldValue.increment(xp) });
+    }
+  }
+
+  try {
+    await batch.commit();
+    console.log('[rewards] committed for room', room.id);
+  } catch(e) {
+    console.error('[rewards] batch error:', e.message);
+  }
+}
+
 function endGame(room, winnerSlot) {
   const gs = room.game;
   gs.gameOver = true; gs.winner = winnerSlot;
   room.status = 'finished';
   if (room.tickInterval) { clearInterval(room.tickInterval); room.tickInterval = null; }
-  // Скасовуємо всі таймери реконекту
   if (room._slotDeleteTimers) {
     for (const t of Object.values(room._slotDeleteTimers)) clearTimeout(t);
     room._slotDeleteTimers = {};
@@ -566,10 +623,16 @@ function endGame(room, winnerSlot) {
     const realPlayer = Object.values(room.players).find(p=>p.trainingMode);
     if(realPlayer) trainingRewards = getTrainingRewards(winnerSlot, realPlayer.slot);
   }
+
+  // Записуємо нагороди на сервері — клієнт більше не пише рейтинг/XP/срібло після матчу
+  commitRewards(room, winnerSlot, places, ratingDeltas, isTraining, trainingRewards);
+
   io.to(room.id).emit('game:over', {
     winnerSlot, players: buildPlayers(room),
     ratingDeltas: isTraining ? {} : ratingDeltas,
     places, trainingRewards,
+    // Сигнал клієнту: сервер взяв запис на себе
+    serverCommitted: !!db,
   });
   setTimeout(() => { rooms.delete(room.id); }, 30000);
 }
