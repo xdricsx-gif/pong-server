@@ -23,6 +23,45 @@ const SLOTS = [0, 1, 2, 3];
 const SLOT_VIEW = ['bottom', 'top', 'left', 'right'];
 const BOT_NAMES = ['ZEPHYR', 'GLITCH', 'NOVA', 'STORM', 'BLAZE', 'PIXEL'];
 
+// ── SHOP CONSTANTS (server-authoritative) ──
+const HANGAR_COSTS_SRV = [
+  null,
+  {cur:'silver', price:5000},
+  {cur:'silver', price:10000},
+  {cur:'silver', price:20000},
+  {cur:'silver', price:35000},
+  {cur:'silver', price:55000},
+  {cur:'silver', price:80000},
+  {cur:'gold',   price:150},
+  {cur:'gold',   price:250},
+  {cur:'gold',   price:400},
+];
+
+const PADDLE_PRICES_SRV = {
+  0:{cur:'free',   price:0},
+  1:{cur:'silver', price:8000},
+  2:{cur:'silver', price:12000},
+  3:{cur:'silver', price:15000},
+  4:{cur:'silver', price:18000},
+  5:{cur:'silver', price:22000},
+  6:{cur:'silver', price:28000},
+  7:{cur:'silver', price:32000},
+  8:{cur:'silver', price:38000},
+  9:{cur:'silver', price:45000},
+  10:{cur:'silver',price:55000},
+  11:{cur:'silver',price:65000},
+  12:{cur:'gold',  price:200},
+  13:{cur:'gold',  price:300},
+  14:{cur:'gold',  price:350},
+  15:{cur:'gold',  price:450},
+  16:{cur:'gold',  price:550},
+  17:{cur:'gold',  price:650},
+  18:{cur:'gold',  price:800},
+  19:{cur:'gold',  price:1000},
+};
+
+const ENERGY_GOLD_COST_SRV = 50;
+
 const CS = [
   { ax: 0,   ay: C,   bx: C,   by: 0,   nx:  1/Math.SQRT2, ny:  1/Math.SQRT2 },
   { ax: W-C, ay: 0,   bx: W,   by: C,   nx: -1/Math.SQRT2, ny:  1/Math.SQRT2 },
@@ -693,7 +732,11 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Реєструємо shop handlers для цього сокета
+  registerShopHandlers(socket);
+
   socket.on('mm:join', ({ nick, rating, uid, wins, games, paddleStats, trainingMode, avatarId }) => {
+    if(uid) socket.uid = uid; // зберігаємо для shop handlers
     if(trainingMode){
       const tRoom = createRoom('training_'+socket.id);
       rooms.set(tRoom.id, tRoom);
@@ -951,6 +994,127 @@ try {
 }
 
 const DAILY_REWARDS = { 1: 100, 2: 50, 3: 30 };
+
+// ── SHOP SOCKET HANDLERS ──
+function registerShopHandlers(socket) {
+  // ── Купівля ракетки ──
+  socket.on('shop:buy_paddle', async ({ paddleId }) => {
+    if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
+    const pid = parseInt(paddleId);
+    const priceDef = PADDLE_PRICES_SRV[pid];
+    if (!priceDef) return socket.emit('shop:error', { msg: 'invalid_paddle' });
+    if (priceDef.cur === 'free') return socket.emit('shop:error', { msg: 'already_free' });
+
+    try {
+      const privRef = db.collection('users_private').doc(socket.uid);
+      const pubRef  = db.collection('users_public').doc(socket.uid);
+      const privSnap = await privRef.get();
+      if (!privSnap.exists) return socket.emit('shop:error', { msg: 'user_not_found' });
+      const priv = privSnap.data();
+
+      // Перевірка: вже куплено?
+      if ((priv.ownedPaddles || []).includes(pid))
+        return socket.emit('shop:error', { msg: 'already_owned' });
+
+      // Перевірка балансу
+      if (priceDef.cur === 'silver' && (priv.silver || 0) < priceDef.price)
+        return socket.emit('shop:error', { msg: 'not_enough_silver' });
+      if (priceDef.cur === 'gold' && (priv.gold || 0) < priceDef.price)
+        return socket.emit('shop:error', { msg: 'not_enough_gold' });
+
+      const privUpd = { ownedPaddles: [...(priv.ownedPaddles||[]), pid] };
+      if (priceDef.cur === 'silver') privUpd.silver = admin.firestore.FieldValue.increment(-priceDef.price);
+      if (priceDef.cur === 'gold')   privUpd.gold   = admin.firestore.FieldValue.increment(-priceDef.price);
+
+      await Promise.all([
+        privRef.update(privUpd),
+        pubRef.update({ paddleId: pid }),
+      ]);
+
+      const newBalance = priceDef.cur === 'silver'
+        ? { silver: (priv.silver || 0) - priceDef.price }
+        : { gold: (priv.gold || 0) - priceDef.price };
+
+      socket.emit('shop:bought_paddle', { paddleId: pid, ...newBalance });
+    } catch(e) {
+      console.error('shop:buy_paddle', e.message);
+      socket.emit('shop:error', { msg: 'server_error' });
+    }
+  });
+
+  // ── Апгрейд модуля ──
+  socket.on('shop:upgrade_hangar', async ({ paddleId, partId }) => {
+    if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
+    const pid = parseInt(paddleId);
+    const VALID_PARTS = ['w','spd','fr','bm','er','fd'];
+    if (!VALID_PARTS.includes(partId)) return socket.emit('shop:error', { msg: 'invalid_part' });
+
+    try {
+      const privRef = db.collection('users_private').doc(socket.uid);
+      const privSnap = await privRef.get();
+      if (!privSnap.exists) return socket.emit('shop:error', { msg: 'user_not_found' });
+      const priv = privSnap.data();
+
+      const hangars = priv.hangars || {};
+      const currentLv = ((hangars[pid] || {})[partId]) || 1;
+      if (currentLv >= 10) return socket.emit('shop:error', { msg: 'max_level' });
+
+      const cost = HANGAR_COSTS_SRV[currentLv];
+      if (!cost) return socket.emit('shop:error', { msg: 'invalid_level' });
+
+      // Перевірка балансу
+      if (cost.cur === 'silver' && (priv.silver || 0) < cost.price)
+        return socket.emit('shop:error', { msg: 'not_enough_silver' });
+      if (cost.cur === 'gold' && (priv.gold || 0) < cost.price)
+        return socket.emit('shop:error', { msg: 'not_enough_gold' });
+
+      const newLv = currentLv + 1;
+      const upd = {};
+      upd[`hangars.${pid}.${partId}`] = newLv;
+      if (cost.cur === 'silver') upd.silver = admin.firestore.FieldValue.increment(-cost.price);
+      if (cost.cur === 'gold')   upd.gold   = admin.firestore.FieldValue.increment(-cost.price);
+
+      await privRef.update(upd);
+
+      const newBalance = cost.cur === 'silver'
+        ? { silver: (priv.silver || 0) - cost.price }
+        : { gold: (priv.gold || 0) - cost.price };
+
+      socket.emit('shop:upgraded', { paddleId: pid, partId, newLevel: newLv, ...newBalance });
+    } catch(e) {
+      console.error('shop:upgrade_hangar', e.message);
+      socket.emit('shop:error', { msg: 'server_error' });
+    }
+  });
+
+  // ── Купівля енергії ──
+  socket.on('shop:buy_energy', async () => {
+    if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
+    try {
+      const privRef = db.collection('users_private').doc(socket.uid);
+      const privSnap = await privRef.get();
+      if (!privSnap.exists) return socket.emit('shop:error', { msg: 'user_not_found' });
+      const priv = privSnap.data();
+
+      if ((priv.gold || 0) < ENERGY_GOLD_COST_SRV)
+        return socket.emit('shop:error', { msg: 'not_enough_gold' });
+
+      await privRef.update({
+        gold: admin.firestore.FieldValue.increment(-ENERGY_GOLD_COST_SRV),
+        energy: 100,
+        energyLastRegen: Date.now(),
+      });
+
+      socket.emit('shop:energy_bought', {
+        gold: (priv.gold || 0) - ENERGY_GOLD_COST_SRV,
+        energy: 100,
+      });
+    } catch(e) {
+      console.error('shop:buy_energy', e.message);
+      socket.emit('shop:error', { msg: 'server_error' });
+    }
+  });
+}
 
 async function processDailyRewards() {
   if (!db) { console.log('No Firebase db — skipping daily rewards'); return; }
