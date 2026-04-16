@@ -735,6 +735,11 @@ io.on('connection', (socket) => {
   // Реєструємо shop handlers для цього сокета
   registerShopHandlers(socket);
 
+  // Аутентифікація для shop без mm:join (з меню/магазину)
+  socket.on('shop:auth', ({ uid }) => {
+    if (uid) socket.uid = uid;
+  });
+
   socket.on('mm:join', ({ nick, rating, uid, wins, games, paddleStats, trainingMode, avatarId }) => {
     if(uid) socket.uid = uid; // зберігаємо для shop handlers
     if(trainingMode){
