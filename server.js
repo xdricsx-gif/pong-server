@@ -871,10 +871,25 @@ io.on('connection', (socket) => {
 
     if (room.status === 'playing' && room.game) {
       const gs = room.game;
+      // Paddle visuals для всіх слотів — щоб після reconnect відображались правильно
+      const rejoinPaddleVisuals = SLOTS.map(s => {
+        const p = Object.values(room.players).find(p => p.slot === s);
+        const stats = p?.paddleStats || room._disconnected?.[s]?.paddleStats || {};
+        const isBot = !p && !room._disconnected?.[s] && room.bots?.[s];
+        if (isBot) {
+          const botRating = room.bots[s].rating || 490;
+          return { paddleId: Math.min(19, Math.floor(botRating / 80)), avgUpgrade: Math.floor(Math.random() * 60) };
+        }
+        return {
+          paddleId: stats.paddleId !== undefined ? stats.paddleId : 0,
+          avgUpgrade: stats.avgUpgrade !== undefined ? Math.round(stats.avgUpgrade * 100) : 0,
+        };
+      });
       socket.emit('rejoin:game', {
         mySlot: slot, players: buildPlayers(room),
         gameOver: gs.gameOver, winner: gs.winner,
         lives: gs.lives, scores: gs.scores,
+        paddleVisuals: rejoinPaddleVisuals,
       });
       socket.emit('myslot', { mySlot: slot });
     } else if (room.status === 'waiting' || room.status === 'countdown') {
