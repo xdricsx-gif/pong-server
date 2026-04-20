@@ -646,6 +646,7 @@ function endGame(room, winnerSlot) {
   gs.gameOver = true; gs.winner = winnerSlot;
   room.status = 'finished';
   if (room.tickInterval) { clearInterval(room.tickInterval); room.tickInterval = null; }
+  if (room.matchTimerInterval) { clearInterval(room.matchTimerInterval); room.matchTimerInterval = null; }
   if (room._slotDeleteTimers) {
     for (const t of Object.values(room._slotDeleteTimers)) clearTimeout(t);
     room._slotDeleteTimers = {};
@@ -706,7 +707,44 @@ function startGame(room) {
     io.to(sid).emit('myslot', { mySlot: player.slot, roomId: room.id });
   }
   room.tickInterval = setInterval(() => tick(room), TICK_MS);
-  console.log(`Game started: ${room.id}, ${Object.keys(room.players).length} real players`);
+
+  // ── Серверний таймер матчу — 3 хвилини ──
+  const MATCH_DURATION_MS = 3 * 60 * 1000;
+  room.matchTimeLeft = MATCH_DURATION_MS;
+
+  // Надсилаємо клієнтам кожну секунду
+  room.matchTimerInterval = setInterval(() => {
+    if (room.game?.gameOver) {
+      clearInterval(room.matchTimerInterval);
+      room.matchTimerInterval = null;
+      return;
+    }
+    room.matchTimeLeft -= 1000;
+    io.to(room.id).emit('match:timer', { timeLeft: room.matchTimeLeft });
+
+    if (room.matchTimeLeft <= 0) {
+      clearInterval(room.matchTimerInterval);
+      room.matchTimerInterval = null;
+      // Час вийшов — визначаємо переможця
+      if (room.game && !room.game.gameOver) {
+        const gs = room.game;
+        const ML_SRV = 10;
+        const active = SLOTS.filter(s => !gs.eliminated?.[s]);
+        if (active.length > 0) {
+          // Хто менше пропустив — переможець
+          const lostMap = {};
+          active.forEach(s => { lostMap[s] = ML_SRV - (gs.lives?.[s] ?? ML_SRV); });
+          const minLost = Math.min(...active.map(s => lostMap[s]));
+          // Якщо рівно — переможець той хто першим йде в SLOTS
+          const winnerSlot = active.find(s => lostMap[s] === minLost);
+          console.log('[match:timeout] room='+room.id+' winner='+winnerSlot+' lost='+JSON.stringify(lostMap));
+          endGame(room, winnerSlot);
+        }
+      }
+    }
+  }, 1000);
+
+  console.log(\`Game started: \${room.id}, \${Object.keys(room.players).length} real players\`);
 }
 
 function startCountdown(room) {
@@ -965,6 +1003,8 @@ io.on('connection', (socket) => {
 
   socket.on('mm:cancel', () => leave());
   socket.on('disconnect', () => leave());
+
+
 
   function leave() {
     if (!myRoom) return;
