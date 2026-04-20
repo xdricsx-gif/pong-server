@@ -744,7 +744,7 @@ function startGame(room) {
     }
   }, 1000);
 
-  console.log(\`Game started: \${room.id}, \${Object.keys(room.players).length} real players\`);
+  console.log(`Game started: ${room.id}, ${Object.keys(room.players).length} real players`);
 }
 
 function startCountdown(room) {
