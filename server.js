@@ -22,6 +22,24 @@ const PS = 3.375;
 const SLOTS = [0, 1, 2, 3];
 const SLOT_VIEW = ['bottom', 'top', 'left', 'right'];
 const BOT_NAMES = ['ZEPHYR', 'GLITCH', 'NOVA', 'STORM', 'BLAZE', 'PIXEL'];
+// Ranked боти — виглядають як живі гравці
+const RANKED_BOT_NICKS = [
+  'NEON_ACE','VORTEX_X','DARK_STAR','CYBER77','ALPHA_K',
+  'BLAZE99','PHANTOM_Z','NOVA_PRIME','STORM_99','PIXEL_LORD',
+  'SHADOW_X','TURBO_ACE','IRON_WOLF','SPEED_K','GLITCH_V',
+  'ECHO_PRIME','ROGUE_X','SOLAR_ACE','VOID_K','MATRIX_X',
+];
+function makeRankedBot(playerRating) {
+  // Рейтинг бота близько до рейтингу гравця (±150)
+  const delta = Math.floor(Math.random() * 300) - 150;
+  const rating = Math.max(100, playerRating + delta);
+  const nick = RANKED_BOT_NICKS[Math.floor(Math.random() * RANKED_BOT_NICKS.length)];
+  const avatarId = Math.floor(Math.random() * 5);
+  // Ракетка залежно від рейтингу
+  const pid = Math.min(19, Math.floor(rating / 120));
+  const avgUpgrade = Math.floor(Math.random() * 80) + 10;
+  return { nick, rating, avatarId, isRankedBot: true, paddleId: pid, avgUpgrade };
+}
 
 // ── SHOP CONSTANTS (server-authoritative) ──
 const HANGAR_COSTS_SRV = [
@@ -35,6 +53,12 @@ const HANGAR_COSTS_SRV = [
   {cur:'gold',   price:150},
   {cur:'gold',   price:250},
   {cur:'gold',   price:400},
+];
+
+// Швидкості ракеток для розрахунку швидкості ботів
+const PADDLE_SPD_SRV = [
+  3.375,3.375,4.5,3.375,3.375,3.375,3.375,3.375,4.5,3.375,
+  3.375,3.375,4.5,3.375,3.375,3.375,3.375,3.375,4.5,3.375,
 ];
 
 const PADDLE_PRICES_SRV = {
@@ -278,15 +302,23 @@ function getAvailableSlot(room) {
   return SLOTS.find(s => !taken.includes(s));
 }
 
-function fillBots(room) {
+function fillBots(room, isRanked = false) {
   room.bots = {};
   let bi = 0;
   const taken = Object.values(room.players).map(p => p.slot);
-  // ── Не ставимо бота на слот відключеного гравця (він може повернутись) ──
   const disconnectedSlots = Object.keys(room._disconnected || {}).map(Number);
+  // Середній рейтинг реальних гравців для калібровки ботів
+  const realPlayers = Object.values(room.players);
+  const avgRating = realPlayers.length
+    ? Math.round(realPlayers.reduce((s, p) => s + (p.rating || 500), 0) / realPlayers.length)
+    : 500;
   for (const s of SLOTS) {
     if (!taken.includes(s) && !disconnectedSlots.includes(s)) {
-      room.bots[s] = { nick: BOT_NAMES[bi++ % BOT_NAMES.length], rating: 490 + Math.floor(Math.random()*30) };
+      if (isRanked) {
+        room.bots[s] = makeRankedBot(avgRating);
+      } else {
+        room.bots[s] = { nick: BOT_NAMES[bi++ % BOT_NAMES.length], rating: 490 + Math.floor(Math.random()*30) };
+      }
     }
   }
 }
@@ -301,7 +333,13 @@ function buildPlayers(room) {
       // ── Відключений гравець — показуємо як гравця (не бота) але з позначкою ──
       res[s] = { nick: room._disconnected[s].nick, rating: room._disconnected[s].rating, isBot: false, disconnected: true, wins: 0, games: 0 };
     } else if (room.bots[s]) {
-      res[s] = { nick: room.bots[s].nick, rating: room.bots[s].rating, isBot: true, wins: 0, games: 0 };
+      const bot = room.bots[s];
+      if (bot.isRankedBot) {
+        // Ranked боти — виглядають як живі гравці
+        res[s] = { nick: bot.nick, rating: bot.rating, isBot: false, wins: Math.floor(Math.random()*50), games: Math.floor(Math.random()*100)+50, avatarId: bot.avatarId || 0 };
+      } else {
+        res[s] = { nick: bot.nick, rating: bot.rating, isBot: true, wins: 0, games: 0 };
+      }
     }
   }
   return res;
@@ -418,23 +456,54 @@ function tick(room) {
     // ── Боти ──
     for (const s of SLOTS) {
       if (!room.bots[s] || gs.eliminated[s]) continue;
+      const bot = room.bots[s];
       const view = SLOT_VIEW[s];
       const isHoriz = view === 'top' || view === 'bottom';
-      const mn = isHoriz ? C+PL/2 : C+PLV/2;
-      const mx = isHoriz ? W-C-PL/2 : H-C-PLV/2;
+      const pw = isHoriz ? PL : PLV;
+      const mn = C + pw/2;
+      const mx = (isHoriz ? W : H) - C - pw/2;
+
+      // Знаходимо найнебезпечніший м'яч
+      let bestBall = gs.balls[0] || {x:W/2,y:H/2,vx:0,vy:0};
+      let bestThreat = -Infinity;
+      for (const b of gs.balls) {
+        const flying = (view==='bottom'&&b.vy>0)||(view==='top'&&b.vy<0)||(view==='left'&&b.vx<0)||(view==='right'&&b.vx>0);
+        const threat = flying ? 1000 - (isHoriz?Math.abs(b.y-(view==='bottom'?H:0)):Math.abs(b.x-(view==='left'?0:W))) : 0;
+        if (threat > bestThreat) { bestThreat = threat; bestBall = b; }
+      }
+
+      // Лінійне передбачення
       const wallPos = isHoriz ? (view==='top'?PTH/2:H-PTH/2) : (view==='left'?PTV/2:W-PTV/2);
-      const ball0 = gs.balls[0] || {x:W/2,y:H/2,vx:0,vy:0};
-      const pred = isHoriz ? predBall(ball0,'x',wallPos) : predBall(ball0,'y',wallPos);
-      gs.botTargets[s] += (pred - gs.botTargets[s]) * 0.08;
+      const velToWall = view==='bottom'?bestBall.vy:view==='top'?-bestBall.vy:view==='left'?-bestBall.vx:bestBall.vx;
+      const distToWall = isHoriz?Math.abs(bestBall.y-wallPos):Math.abs(bestBall.x-wallPos);
+      const ttr = velToWall > 0.1 ? distToWall/velToWall : 30;
+      const predictedPerp = isHoriz
+        ? (bestBall.x + bestBall.vx * Math.min(ttr, 16) * 0.8)
+        : (bestBall.y + bestBall.vy * Math.min(ttr, 16) * 0.8);
+      const jitter = (Math.random()-0.5) * (bot.isRankedBot ? 5 : 8);
+      const target = Math.max(mn, Math.min(mx, predictedPerp + jitter));
+
+      // Швидкість: ranked боти використовують свою ракетку
+      const botBaseSpd = PADDLE_SPD_SRV[bot.paddleId] || 3.375;
+      const botMult = 0.9 + (bot.avgUpgrade||30)/100*0.3;
+      const botSpd = bot.isRankedBot ? Math.min(SMAX, botBaseSpd*botMult) : 3.5;
+
+      gs.botTargets[s] += (target - gs.botTargets[s]) * (bot.isRankedBot ? 0.16 : 0.08);
       const diff = gs.botTargets[s] - gs.paddles[s];
-      if (Math.abs(diff) > 2) gs.paddles[s] = Math.max(mn, Math.min(mx, gs.paddles[s] + Math.sign(diff)*Math.min(3.5,Math.abs(diff))));
-      if (!gs.fields[s].active && gs.energy[s] >= EPU) {
-        const p = slotToPaddle(s, gs.paddles[s], gs, room);
-        const _b0 = gs.balls[0] || {x:W/2,y:H/2};
-        const dist = isHoriz ? Math.abs(_b0.y-(p.y+p.h/2)) : Math.abs(_b0.x-(p.x+p.w/2));
-        if (dist < 80 && Math.random() < 0.02) {
-          gs.fields[s].active = true; gs.fields[s].t = 0;
-          gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
+      if (Math.abs(diff) > 1) gs.paddles[s] = Math.max(mn, Math.min(mx, gs.paddles[s] + Math.sign(diff)*Math.min(botSpd, Math.abs(diff))));
+
+      // Силове поле: активуємо коли м'яч реально летить до нас і потрапить в радіус
+      if (!gs.fields[s].active && gs.energy[s] >= EPU && velToWall > 0.1 && distToWall > 0) {
+        const ticksToArrive = distToWall / velToWall;
+        if (ticksToArrive >= 5 && ticksToArrive <= 30) {
+          const predictedHit = isHoriz
+            ? (bestBall.x + bestBall.vx * ticksToArrive)
+            : (bestBall.y + bestBall.vy * ticksToArrive);
+          const botFR = bot.isRankedBot ? Math.round(FR * (0.9 + (bot.avgUpgrade||30)/100*0.3)) : FR;
+          if (Math.abs(predictedHit - gs.paddles[s]) < botFR + BR + 4) {
+            gs.fields[s].active = true; gs.fields[s].t = 0; gs.fields[s].maxR = botFR;
+            gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
+          }
         }
       }
     }
@@ -658,6 +727,7 @@ function endGame(room, winnerSlot) {
   const ratingDeltas = {};
   places.forEach((slot, idx) => { ratingDeltas[slot] = RATING_BY_PLACE[idx] || -20; });
   const isTraining = Object.values(room.players).some(p => p.trainingMode);
+  const hasRankedBots = Object.values(room.bots||{}).some(b => b.isRankedBot);
   let trainingRewards = null;
   if(isTraining){
     const realPlayer = Object.values(room.players).find(p=>p.trainingMode);
@@ -680,10 +750,12 @@ function endGame(room, winnerSlot) {
 function startGame(room) {
   room.status = 'playing';
   // Боти тільки для тренування — в рейтингових грають тільки реальні гравці
-  if (Object.values(room.players).some(p => p.trainingMode)) {
-    fillBots(room);
+  const isTrainingRoom = Object.values(room.players).some(p => p.trainingMode);
+  if (isTrainingRoom) {
+    fillBots(room, false);
   } else {
-    room.bots = {}; // очищаємо ботів для ranked
+    // Ranked — заповнюємо порожні слоти ranked-ботами
+    fillBots(room, true);
   }
   room.game = createGameState(room);
   // Paddle visual data — передається один раз при старті
@@ -692,8 +764,11 @@ function startGame(room) {
     const stats = p?.paddleStats || room._disconnected?.[s]?.paddleStats || {};
     const isBot = !p && !room._disconnected?.[s] && room.bots?.[s];
     if (isBot) {
-      // Боти мають рандомний клас ракетки для різноманіття
-      const botRating = room.bots[s].rating || 490;
+      const bot = room.bots[s];
+      if (bot.isRankedBot) {
+        return { paddleId: bot.paddleId || 0, avgUpgrade: bot.avgUpgrade || 30 };
+      }
+      const botRating = bot.rating || 490;
       const botPaddleId = Math.min(19, Math.floor(botRating / 80));
       return { paddleId: botPaddleId, avgUpgrade: Math.floor(Math.random() * 60) };
     }
