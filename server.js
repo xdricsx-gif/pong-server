@@ -823,20 +823,22 @@ function startGame(room) {
       clearInterval(room.matchTimerInterval);
       room.matchTimerInterval = null;
       // Час вийшов — визначаємо переможця
-      if (room.game && !room.game.gameOver) {
+      try { if (room.game && !room.game.gameOver) {
         const gs = room.game;
         const ML_SRV = 10;
         const active = SLOTS.filter(s => !gs.eliminated?.[s]);
         if (active.length > 0) {
           // Хто менше пропустив — переможець
           // Переможець = хто більше lives залишилось (менше пропустив)
+          const livesMap = {};
+          active.forEach(s => { livesMap[s] = gs.lives?.[s] ?? 0; });
           const winnerSlot = active.reduce((a, b) =>
-            (gs.lives?.[a] ?? 0) >= (gs.lives?.[b] ?? 0) ? a : b
+            livesMap[a] >= livesMap[b] ? a : b
           );
-          console.log('[match:timeout] room='+room.id+' winner='+winnerSlot+' lost='+JSON.stringify(lostMap));
+          console.log('[match:timeout] room='+room.id+' winner='+winnerSlot+' lives='+JSON.stringify(livesMap));
           endGame(room, winnerSlot);
         }
-      }
+      } } catch(e) { console.error('[match:timeout] error:', e.message, e.stack); }
     }
   }, 1000);
 
