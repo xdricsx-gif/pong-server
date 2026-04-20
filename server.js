@@ -24,10 +24,26 @@ const SLOT_VIEW = ['bottom', 'top', 'left', 'right'];
 const BOT_NAMES = ['ZEPHYR', 'GLITCH', 'NOVA', 'STORM', 'BLAZE', 'PIXEL'];
 // Ranked боти — виглядають як живі гравці
 const RANKED_BOT_NICKS = [
-  'NEON_ACE','VORTEX_X','DARK_STAR','CYBER77','ALPHA_K',
-  'BLAZE99','PHANTOM_Z','NOVA_PRIME','STORM_99','PIXEL_LORD',
-  'SHADOW_X','TURBO_ACE','IRON_WOLF','SPEED_K','GLITCH_V',
-  'ECHO_PRIME','ROGUE_X','SOLAR_ACE','VOID_K','MATRIX_X',
+  'xXxSNIPERxXx','DARK_KNIGHT','PRO_GAMER_1','SHADOW_WOLF','KILLER_INSTINCT',
+  'NOOB_DESTROYER','LEGENDARY_X','GHOST_RECON','TOXIC_BEAST','RAGE_QUIT_LOL',
+  'HEADSHOT_KING','CYBER_NINJA','STEALTH_MODE','BLOOD_MOON','VOID_WALKER',
+  'NIGHT_CRAWLER','DEMON_SLAYER','EPIC_FAIL','GOD_OF_WAR','ZERO_DEATHS',
+  'NEON_VIPER','IRON_FIST','BLAZE_RUNNER','STORM_CHASER','DARK_MATTER',
+  'PIXEL_REAPER','TURBO_SHARK','LASER_WOLF','HYPER_X','MATRIX_BREAKER',
+  'ALPHA_WOLF','OMEGA_PRIME','THUNDER_GOD','DEATH_BRINGER','CHAOS_LORD',
+  'SILENT_KILLER','RAPID_FIRE','COLD_BLOODED','NOVA_STRIKE','CYBER_WOLF',
+  'SHADOW_HUNTER','GHOST_BLADE','DARK_PHOENIX','TOXIC_SNIPER','VENOM_X',
+  'DRAGON_SLAYER','NIGHT_HAWK','IRON_MAIDEN','SPEED_DEMON','ACID_RAIN',
+  'PRO_HUNTER','SKULL_KING','DEATH_STAR','TITAN_FALL','BLACK_OPS',
+  'REAPER_X','GRIM_SHADOW','STORM_RIDER','BLADE_MASTER','FIRE_WOLF',
+  'ELECTRIC_X','PLASMA_GUN','NUCLEAR_X','DARK_FORCE','QUANTUM_ACE',
+  'HYPER_BEAST','LASER_HAWK','TURBO_KING','VOID_REAPER','ALPHA_PRIME',
+  'TOXIC_LORD','CYBER_BEAST','NEON_GHOST','IRON_WOLF','SHADOW_PRIME',
+  'DEATH_HAWK','STORM_WOLF','BLADE_X','FIRE_HAWK','DARK_WOLF',
+  'ELECTRIC_WOLF','PLASMA_X','NUCLEAR_WOLF','DARK_HAWK','QUANTUM_WOLF',
+  'HYPER_WOLF','LASER_X','TURBO_WOLF','VOID_WOLF','ALPHA_HAWK',
+  'TOXIC_WOLF','CYBER_HAWK','NEON_WOLF','IRON_HAWK','SHADOW_WOLF99',
+  'DEATH_WOLF','STORM_HAWK','BLADE_WOLF','FIRE_X','DARK_PRIME',
 ];
 function makeRankedBot(playerRating) {
   // Рейтинг бота близько до рейтингу гравця (±150)
@@ -721,8 +737,12 @@ function endGame(room, winnerSlot) {
     room._slotDeleteTimers = {};
   }
   const RATING_BY_PLACE = [50, 20, 5, -20];
+  const ML_END = 10;
+  // Місця визначаються за кількістю залишених lives (більше = менше пропустив = вище місце)
+  // Переможець вже визначений, решта сортується за lives (desc)
   const places = [winnerSlot];
-  const others = SLOTS.filter(s => s !== winnerSlot).sort((a,b) => (gs.scores[b]||0) - (gs.scores[a]||0));
+  const others = SLOTS.filter(s => s !== winnerSlot)
+    .sort((a, b) => (gs.lives[b] ?? 0) - (gs.lives[a] ?? 0));
   places.push(...others);
   const ratingDeltas = {};
   places.forEach((slot, idx) => { ratingDeltas[slot] = RATING_BY_PLACE[idx] || -20; });
@@ -807,11 +827,10 @@ function startGame(room) {
         const active = SLOTS.filter(s => !gs.eliminated?.[s]);
         if (active.length > 0) {
           // Хто менше пропустив — переможець
-          const lostMap = {};
-          active.forEach(s => { lostMap[s] = ML_SRV - (gs.lives?.[s] ?? ML_SRV); });
-          const minLost = Math.min(...active.map(s => lostMap[s]));
-          // Якщо рівно — переможець той хто першим йде в SLOTS
-          const winnerSlot = active.find(s => lostMap[s] === minLost);
+          // Переможець = хто більше lives залишилось (менше пропустив)
+          const winnerSlot = active.reduce((a, b) =>
+            (gs.lives?.[a] ?? 0) >= (gs.lives?.[b] ?? 0) ? a : b
+          );
           console.log('[match:timeout] room='+room.id+' winner='+winnerSlot+' lost='+JSON.stringify(lostMap));
           endGame(room, winnerSlot);
         }
