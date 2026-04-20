@@ -362,7 +362,9 @@ function buildPlayers(room) {
 }
 
 function broadcastLobby(room) {
-  io.to(room.id).emit('lobby:update', { players: buildPlayers(room) });
+  // НЕ надсилаємо список гравців — лише кількість підключених
+  const count = Object.keys(room.players).length;
+  io.to(room.id).emit('lobby:update', { count });
 }
 
 function createGameState(room) {
