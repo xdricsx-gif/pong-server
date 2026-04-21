@@ -1,6 +1,7 @@
 // SERVER FINAL — Authoritative 60 tick
 const { createServer } = require('http');
 const { Server } = require('socket.io');
+const { Pool } = require('pg');
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
@@ -10,6 +11,149 @@ const io = new Server(httpServer, {
 });
 
 const PORT = process.env.PORT || 3000;
+
+// ══════════════════════════════════════════════════════
+// POSTGRESQL ANALYTICS
+// ══════════════════════════════════════════════════════
+let pgPool = null;
+
+async function initPostgres() {
+  if (!process.env.DATABASE_URL) {
+    console.log('[Analytics] DATABASE_URL not set — analytics disabled');
+    return;
+  }
+  try {
+    pgPool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS players (
+        uid TEXT PRIMARY KEY,
+        first_seen TIMESTAMPTZ DEFAULT NOW(),
+        last_seen TIMESTAMPTZ DEFAULT NOW(),
+        total_games INT DEFAULT 0,
+        total_wins INT DEFAULT 0,
+        peak_rating INT DEFAULT 500,
+        total_playtime_sec INT DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS game_events (
+        id SERIAL PRIMARY KEY,
+        ts TIMESTAMPTZ DEFAULT NOW(),
+        event_type TEXT NOT NULL,
+        uid TEXT,
+        room_id TEXT,
+        mode TEXT,
+        place INT,
+        duration_sec INT,
+        rating_delta INT,
+        bots_count INT,
+        players_count INT,
+        goals_conceded INT
+      );
+      CREATE TABLE IF NOT EXISTS daily_stats (
+        date DATE PRIMARY KEY,
+        dau INT DEFAULT 0,
+        games_played INT DEFAULT 0,
+        avg_game_duration_sec INT DEFAULT 0,
+        new_registrations INT DEFAULT 0,
+        total_playtime_sec BIGINT DEFAULT 0
+      );
+    `);
+    console.log('[Analytics] PostgreSQL connected and tables ready');
+  } catch(e) {
+    console.error('[Analytics] PostgreSQL init error:', e.message);
+    pgPool = null;
+  }
+}
+
+async function trackEvent(eventType, data = {}) {
+  if (!pgPool) return;
+  try {
+    await pgPool.query(
+      `INSERT INTO game_events (event_type, uid, room_id, mode, place, duration_sec, rating_delta, bots_count, players_count, goals_conceded)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [eventType, data.uid||null, data.roomId||null, data.mode||null,
+       data.place??null, data.durationSec??null, data.ratingDelta??null,
+       data.botsCount??null, data.playersCount??null, data.goalsConceded??null]
+    );
+  } catch(e) { console.error('[Analytics] trackEvent error:', e.message); }
+}
+
+async function trackPlayerSeen(uid, isNew = false) {
+  if (!pgPool || !uid) return;
+  try {
+    if (isNew) {
+      await pgPool.query(
+        `INSERT INTO players (uid) VALUES ($1) ON CONFLICT (uid) DO UPDATE SET last_seen=NOW()`,
+        [uid]
+      );
+      // Daily new registrations
+      await pgPool.query(
+        `INSERT INTO daily_stats (date, new_registrations) VALUES (CURRENT_DATE, 1)
+         ON CONFLICT (date) DO UPDATE SET new_registrations = daily_stats.new_registrations + 1`
+      );
+    } else {
+      await pgPool.query(
+        `INSERT INTO players (uid) VALUES ($1)
+         ON CONFLICT (uid) DO UPDATE SET last_seen=NOW()`,
+        [uid]
+      );
+    }
+    // Daily active users
+    await pgPool.query(
+      `INSERT INTO daily_stats (date, dau) VALUES (CURRENT_DATE, 1)
+       ON CONFLICT (date) DO UPDATE
+       SET dau = (SELECT COUNT(DISTINCT uid) FROM game_events
+                  WHERE ts::date = CURRENT_DATE AND uid IS NOT NULL)`,
+    );
+  } catch(e) { console.error('[Analytics] trackPlayerSeen error:', e.message); }
+}
+
+async function trackGameEnd(room, winnerSlot, places, isTraining) {
+  if (!pgPool) return;
+  try {
+    const durationSec = room.startedAt ? Math.round((Date.now() - room.startedAt) / 1000) : null;
+    const botsCount = Object.keys(room.bots || {}).filter(s => room.bots[s]).length;
+    const playersCount = Object.keys(room.players).length;
+    const mode = isTraining ? 'training' : (botsCount > 0 ? 'ranked_bots' : 'ranked');
+
+    for (const [sid, player] of Object.entries(room.players)) {
+      if (!player.uid) continue;
+      const placeIdx = places.indexOf(player.slot);
+      const gs = room.game;
+      const goalsConceded = gs ? (10 - (gs.lives?.[player.slot] ?? 10)) : null;
+
+      await trackEvent('game_end', {
+        uid: player.uid, roomId: room.id, mode,
+        place: placeIdx + 1, durationSec,
+        botsCount, playersCount, goalsConceded,
+      });
+
+      // Оновлюємо статистику гравця
+      await pgPool.query(
+        `UPDATE players SET
+          total_games = total_games + 1,
+          total_wins = total_wins + $2,
+          total_playtime_sec = total_playtime_sec + $3,
+          last_seen = NOW()
+         WHERE uid = $1`,
+        [player.uid, placeIdx === 0 ? 1 : 0, durationSec || 0]
+      );
+    }
+
+    // Daily stats
+    if (durationSec) {
+      await pgPool.query(
+        `INSERT INTO daily_stats (date, games_played, total_playtime_sec)
+         VALUES (CURRENT_DATE, 1, $1)
+         ON CONFLICT (date) DO UPDATE
+         SET games_played = daily_stats.games_played + 1,
+             total_playtime_sec = daily_stats.total_playtime_sec + $1`,
+        [durationSec]
+      );
+    }
+  } catch(e) { console.error('[Analytics] trackGameEnd error:', e.message); }
+}
+
+initPostgres();
 const TICK_RATE = 60;
 const TICK_MS = 1000 / TICK_RATE;
 
@@ -758,6 +902,8 @@ function endGame(room, winnerSlot) {
 
   // Записуємо нагороди на сервері — клієнт більше не пише рейтинг/XP/срібло після матчу
   commitRewards(room, winnerSlot, places, ratingDeltas, isTraining, trainingRewards);
+  // Аналітика
+  trackGameEnd(room, winnerSlot, places, isTraining);
 
   io.to(room.id).emit('game:over', {
     winnerSlot, players: buildPlayers(room),
@@ -804,6 +950,7 @@ function startGame(room) {
     io.to(sid).emit('myslot', { mySlot: player.slot, roomId: room.id });
   }
   room.tickInterval = setInterval(() => tick(room), TICK_MS);
+  room.startedAt = Date.now(); // для підрахунку тривалості матчу
 
   // ── Серверний таймер матчу — 3 хвилини ──
   const MATCH_DURATION_MS = 3 * 60 * 1000;
@@ -943,6 +1090,7 @@ io.on('connection', (socket) => {
 
   socket.on('mm:join', ({ nick, rating, uid, wins, games, paddleStats, trainingMode, avatarId }) => {
     if(uid) socket.uid = uid; // зберігаємо для shop handlers
+    if(uid && !trainingMode) trackPlayerSeen(uid);
     if(trainingMode){
       const tRoom = createRoom('training_'+socket.id);
       rooms.set(tRoom.id, tRoom);
