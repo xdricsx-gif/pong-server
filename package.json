@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "4-Player Pong WebSocket Server",
   "main": "server.js",
+  "pg": "^8.11.0",
   "scripts": {
     "start": "node server.js"
   },
@@ -13,5 +14,4 @@
   "engines": {
     "node": ">=18.0.0"
   }
-  "pg": "^8.11.0"
 }
