@@ -617,47 +617,26 @@ function applyFFBall(gs, s, ball) {
   if (ball[_cdKey] && ball[_cdKey] > 0) { ball[_cdKey]--; return false; }
 
   const p = slotToPaddle(s, gs.paddles[s], gs, null);
-  const view = SLOT_VIEW[s];
   const fcx = p.x + p.w/2, fcy = p.y + p.h/2;
   const maxR = f.maxR || FR;
   const collideR = maxR + BR;
 
-  // ── Face normal: ФІКСОВАНИЙ напрямок від паддла назовні ──
-  // bottom (paddle знизу, ворота внизу) → поле штовхає вгору  → (0,-1)
-  // top    (paddle зверху)              → поле штовхає вниз → (0,+1)
-  // left                                → поле штовхає вправо → (+1,0)
-  // right                               → поле штовхає вліво  → (-1,0)
-  let nx = 0, ny = 0;
-  // Tangent — напрямок вздовж паддла (вісь, по якій рухається гравець)
-  let tx = 0, ty = 0;
-  if (view === 'bottom')     { nx =  0; ny = -1; tx = 1; ty = 0; }
-  else if (view === 'top')   { nx =  0; ny =  1; tx = 1; ty = 0; }
-  else if (view === 'left')  { nx =  1; ny =  0; tx = 0; ty = 1; }
-  else if (view === 'right') { nx = -1; ny =  0; tx = 0; ty = 1; }
-
-  // ── Швидкість м'яча У БІК ПАДДЛА (додатнє = летить всередину поля) ──
-  const velTowardPaddle = -(ball.vx*nx + ball.vy*ny);
-
-  // ── Distance checks (circle test) ──
+  // ── Теперішня та попередня позиція м'яча відносно центру поля ──
   const dx = ball.x - fcx, dy = ball.y - fcy;
   const dist = Math.hypot(dx, dy);
   const oldX = ball.x - ball.vx, oldY = ball.y - ball.vy;
   const odx = oldX - fcx, ody = oldY - fcy;
   const oldDist = Math.hypot(odx, ody);
 
-  // ── Нічого робити якщо м'яч не в зоні ──
+  // ── Нічого не робимо якщо м'яч не в полі ──
   if (dist > collideR && oldDist > collideR) return false;
 
-  // ── М'яч уже відлітає — НЕ ЧІПАЄМО ──
-  // Це усуває "крюк" коли поле наздоганяє відбитий м'яч.
-  if (velTowardPaddle <= 0) return false;
-
-  // ── Якщо раніше не був у полі і зараз в полі — знайти точку перетину (CCD) ──
-  // Інакше м'яч вже був у полі (можливо через тільки-що активоване поле) — відбиваємо
-  // з поточної позиції.
-  let hitX = ball.x, hitY = ball.y;
+  // ── Знайти ТОЧКУ КОНТАКТУ (де саме м'яч торкнувся межі поля) ──
+  // Якщо м'яч цього тіку перетнув межу — знайдемо точку через CCD.
+  // Якщо м'яч уже був у полі (наприклад, поле щойно активоване) — бере поточну позицію.
+  let hitX, hitY;
   if (oldDist > collideR && dist <= collideR) {
-    // Solve |old + t*v - center|² = collideR² for t ∈ [0,1]
+    // CCD: |old + t·V − center|² = collideR², розв'язуємо t ∈ [0,1]
     const vx = ball.vx, vy = ball.vy;
     const a = vx*vx + vy*vy;
     const b = 2 * (odx*vx + ody*vy);
@@ -671,40 +650,52 @@ function applyFFBall(gs, s, ball) {
       }
     }
   }
+  if (hitX === undefined) {
+    // Fallback — м'яч уже всередині поля
+    hitX = ball.x; hitY = ball.y;
+  }
 
-  // ── Офсет м'яча від центру паддла вздовж осі паддла (tangent) ──
-  // Це ключове для прогнозованості: де торкнулось, туди і летить.
-  // bottom: offset = ball.x - paddleCenterX
-  // left:   offset = ball.y - paddleCenterY
-  const offsetAxis = (hitX - fcx) * tx + (hitY - fcy) * ty;
+  // ── Нормаль = від центру поля ДО точки контакту ──
+  // Це дає природну фізику: "яким боком поля торкнувся — туди і відлітає".
+  // 360° континіум напрямків — жодного дискретного квантування.
+  const hdx = hitX - fcx, hdy = hitY - fcy;
+  const hdist = Math.hypot(hdx, hdy);
+  let nx, ny;
+  if (hdist > 1e-6) {
+    nx = hdx / hdist;
+    ny = hdy / hdist;
+  } else {
+    // М'яч точно в центрі (рідко) — fallback на обличчя паддла
+    const view = SLOT_VIEW[s];
+    if (view === 'bottom')     { nx = 0; ny = -1; }
+    else if (view === 'top')   { nx = 0; ny =  1; }
+    else if (view === 'left')  { nx = 1; ny =  0; }
+    else                       { nx =-1; ny =  0; }
+  }
 
-  // Нормалізуємо до ±1 (межа = радіус поля)
-  const maxOffset = collideR;
-  let k = offsetAxis / maxOffset;
-  if (k > 1) k = 1; else if (k < -1) k = -1;
+  // ── Чи летить м'яч У поле? (V·n < 0 = наближається до центру) ──
+  // Якщо летить НАЗОВНІ — повне ігнорування. Це усуває "крюк".
+  const vDotN = ball.vx * nx + ball.vy * ny;
+  if (vDotN >= 0) return false;
 
-  // ── Кут відбиття: 0° в центрі, ±60° на краях ──
-  const MAX_ANGLE_RAD = Math.PI / 3;
-  const angle = k * MAX_ANGLE_RAD;
+  // ── Віддзеркалюємо швидкість по нормалі: V' = V − 2(V·n)n ──
+  ball.vx = ball.vx - 2 * vDotN * nx;
+  ball.vy = ball.vy - 2 * vDotN * ny;
 
-  // ── Фінальний напрямок: nominal normal повернута на `angle` в бік tangent ──
-  // out = n*cos(angle) + t*sin(angle)
-  const cosA = Math.cos(angle), sinA = Math.sin(angle);
-  const outX = nx * cosA + tx * sinA;
-  const outY = ny * cosA + ty * sinA;
-
-  // ── Швидкість: нарощуємо до (сучасна speed × BMULT) з clamp до SMAX ──
+  // ── Буст швидкості (BMULT) з обмеженням SMAX ──
   const vSpeed = Math.hypot(ball.vx, ball.vy);
   const targetSpeed = Math.min(Math.max(vSpeed, 2.5) * BMULT, SMAX);
+  if (vSpeed > 0.01) {
+    ball.vx = ball.vx / vSpeed * targetSpeed;
+    ball.vy = ball.vy / vSpeed * targetSpeed;
+  }
 
-  ball.vx = outX * targetSpeed;
-  ball.vy = outY * targetSpeed;
+  // ── Позиція: залишаємо м'яч у точці контакту, трохи виштовхуємо по нормалі ──
+  // НЕ телепортуємо на край поля! М'яч лишається там, де торкнувся.
+  ball.x = hitX + nx * 2;
+  ball.y = hitY + ny * 2;
 
-  // ── Ставимо м'яч на край поля в напрямку out (безпечна позиція назовні) ──
-  ball.x = fcx + outX * (collideR + 4);
-  ball.y = fcy + outY * (collideR + 4);
-
-  // ── Cooldown 10 тіків (~167ms) — щоб не було re-entry ──
+  // ── Cooldown 10 тіків (~167ms) — запобігає повторному відбиттю ──
   ball[_cdKey] = 10;
 
   // ── Округлення для детермінізму клієнт/сервер ──
