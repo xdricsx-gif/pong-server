@@ -401,6 +401,101 @@ async function resolveUid({ idToken, fallbackUid }) {
   return verified ? verified.uid : null;
 }
 
+// ══════════════════════════════════════════════════════
+// PUBLIC CONFIG ENDPOINT — /config.json
+// ══════════════════════════════════════════════════════
+// Єдина точка правди для public констант. Клієнт fetch'ить це
+// при старті і перезаписує свої локальні значення.
+// Змінюючи константу — мінять ТУТ, клієнт автоматично підхопить.
+// CONFIG_VERSION — якщо бампаєш — clients повинні refetch (кеш invalidate).
+const CONFIG_VERSION = 1;
+
+// Повний каталог ракеток (дзеркало клієнтського, плюс name/desc/price — для UI)
+const PADDLE_CATALOG_FULL = [
+  {id:0, name:'Новачок',  desc:'Базова ракетка',                price:0,     cur:'free',   lvl:1,  spd:3.375,w:54,fr:54,bm:2.32,er:1.0, fd:1.0},
+  {id:1, name:'Фронтир',  desc:'Ширша площа відбивання',        price:8000,  cur:'silver', lvl:1,  spd:3.375,w:62,fr:54,bm:2.32,er:1.0, fd:1.0},
+  {id:2, name:'Вектор',   desc:'Підвищена швидкість руху',      price:12000, cur:'silver', lvl:2,  spd:4.5,  w:50,fr:54,bm:2.32,er:1.0, fd:1.0},
+  {id:3, name:'Орбіта',   desc:'Більший радіус силового поля',  price:15000, cur:'silver', lvl:2,  spd:3.375,w:52,fr:68,bm:2.32,er:1.0, fd:1.0},
+  {id:4, name:'Імпульс',  desc:'Сильніше відбиття поля',        price:18000, cur:'silver', lvl:3,  spd:3.375,w:52,fr:54,bm:2.9, er:1.0, fd:1.0},
+  {id:5, name:'Авангард', desc:'Дуже широка але повільна',      price:22000, cur:'silver', lvl:3,  spd:2.5,  w:72,fr:54,bm:2.32,er:1.2, fd:1.0},
+  {id:6, name:'Спринт',   desc:'Максимальна швидкість',         price:28000, cur:'silver', lvl:4,  spd:5.5,  w:46,fr:50,bm:2.0, er:1.3, fd:0.8},
+  {id:7, name:'Сталкер',  desc:'Вузька з великим полем',        price:32000, cur:'silver', lvl:4,  spd:3.8,  w:42,fr:72,bm:2.6, er:1.0, fd:1.4},
+  {id:8, name:'Баланс',   desc:'Рівні покращені характеристики',price:38000, cur:'silver', lvl:5,  spd:4.0,  w:58,fr:60,bm:2.5, er:1.2, fd:1.2},
+  {id:9, name:'Егіда',    desc:'Гігантська ширина',             price:45000, cur:'silver', lvl:6,  spd:2.8,  w:80,fr:50,bm:2.0, er:1.5, fd:1.0},
+  {id:10,name:'Зевс',     desc:'Надшвидка з середнім полем',    price:55000, cur:'silver', lvl:7,  spd:6.0,  w:48,fr:58,bm:2.4, er:1.5, fd:0.7},
+  {id:11,name:'Полюс',    desc:'Гігантський радіус поля',       price:65000, cur:'silver', lvl:8,  spd:3.2,  w:50,fr:90,bm:2.6, er:0.8, fd:1.6},
+  {id:12,name:'Титан',    desc:'Широка і потужна',              price:200,   cur:'gold',   lvl:5,  spd:3.6,  w:66,fr:60,bm:2.8, er:1.3, fd:1.3},
+  {id:13,name:'Темпест',  desc:'Швидка з великим полем',        price:300,   cur:'gold',   lvl:6,  spd:5.0,  w:52,fr:72,bm:2.7, er:1.4, fd:1.2},
+  {id:14,name:'Кріон',    desc:'Потужне поле з широкою базою',  price:350,   cur:'gold',   lvl:7,  spd:3.8,  w:62,fr:70,bm:3.2, er:1.2, fd:1.5},
+  {id:15,name:'Рейвен',   desc:'Висока сила і швидкість',       price:450,   cur:'gold',   lvl:9,  spd:5.2,  w:54,fr:66,bm:3.4, er:1.5, fd:1.2},
+  {id:16,name:'Фантом',   desc:'Широка з великим полем',        price:550,   cur:'gold',   lvl:10, spd:4.0,  w:76,fr:78,bm:3.0, er:1.3, fd:1.6},
+  {id:17,name:'Інферно',  desc:'Найпотужніше поле в грі',       price:650,   cur:'gold',   lvl:12, spd:3.5,  w:58,fr:86,bm:3.8, er:1.2, fd:1.8},
+  {id:18,name:'Етернал',  desc:'Все збалансовано на максимумі', price:800,   cur:'gold',   lvl:15, spd:5.0,  w:68,fr:80,bm:3.5, er:1.6, fd:1.6},
+  {id:19,name:'Абсолют',  desc:'Найкраща ракетка в грі',        price:1000,  cur:'gold',   lvl:20, spd:6.0,  w:76,fr:92,bm:4.0, er:2.0, fd:2.0},
+];
+
+function getPublicConfig() {
+  return {
+    version: CONFIG_VERSION,
+    paddleCatalog: PADDLE_CATALOG_FULL,
+    hangarCosts: HANGAR_COSTS_SRV,       // null, silver/gold ціни за рівень
+    energyGoldCost: ENERGY_GOLD_COST_SRV,
+    game: {
+      W, H, C, BR, SMAX, PL, PLV, PTH, PTV,
+      ML, EPU, FR, BMULT, PS,
+      FDR, RD,
+      tickRate: TICK_RATE,
+      matchDurationMs: 3 * 60 * 1000,
+    },
+    exchangeRates: [
+      { goldIn:1,   silverOut:100   },
+      { goldIn:5,   silverOut:500   },
+      { goldIn:10,  silverOut:1000  },
+      { goldIn:50,  silverOut:5000  },
+      { goldIn:100, silverOut:10000 },
+    ],
+  };
+}
+
+httpServer.on('request', (req, res) => {
+  // CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET',
+      'Access-Control-Max-Age': '86400',
+    });
+    res.end();
+    return;
+  }
+  if (req.method === 'GET' && (req.url === '/config.json' || req.url.startsWith('/config.json?'))) {
+    try {
+      const body = JSON.stringify(getPublicConfig());
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+        // Клієнт може кешувати 5 хвилин; при зміні CONFIG_VERSION клієнт робить refetch
+        'Cache-Control': 'public, max-age=300',
+      });
+      res.end(body);
+    } catch(e) {
+      res.writeHead(500); res.end('config error');
+    }
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('ok');
+    return;
+  }
+  // Інші маршрути — нехай socket.io сам обробляє (handshake etc).
+  // Якщо не socket.io URL — 404.
+  if (!req.url.startsWith('/socket.io/')) {
+    res.writeHead(404);
+    res.end();
+  }
+});
+
 const CS = [
   { ax: 0,   ay: C,   bx: C,   by: 0,   nx:  1/Math.SQRT2, ny:  1/Math.SQRT2 },
   { ax: W-C, ay: 0,   bx: W,   by: C,   nx: -1/Math.SQRT2, ny:  1/Math.SQRT2 },
