@@ -302,9 +302,15 @@ function computePaddleStats(paddleId, hangars) {
     result[part] = +(base[part] * mult).toFixed(3);
     sumLv += lv;
   }
-  // avgUpgrade — середній рівень апгрейдів, у % від максимуму (для відображення іконки)
-  const avgLv = sumLv / HANGAR_PARTS_SRV.length;
-  result.avgUpgrade = Math.round(((avgLv - 1) / 9) * 100);
+  // avgUpgrade — середній прогрес апгрейдів як ДРІБ 0..1
+  // (контракт з клієнтом: getPaddleAvgUpgrade() повертає 0..1)
+  // MAX_LVL=9 — рівень 1 = 0 апгрейдів, рівень 10 = 9 апгрейдів
+  const MAX_LV = 9;
+  let totalUpgrades = 0;
+  for (const part of HANGAR_PARTS_SRV) {
+    totalUpgrades += (hangarForPid[part] || 1) - 1;
+  }
+  result.avgUpgrade = totalUpgrades / (HANGAR_PARTS_SRV.length * MAX_LV);
   return result;
 }
 
