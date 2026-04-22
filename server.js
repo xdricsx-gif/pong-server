@@ -1855,3 +1855,90 @@ function scheduleDailyRewards() {
 }
 
 scheduleDailyRewards();
+
+// ══════════════════════════════════════════════════════
+// GRACEFUL SHUTDOWN — SIGTERM/SIGINT
+// ══════════════════════════════════════════════════════
+// Railway при redeploy надсилає SIGTERM, через ~10с — SIGKILL.
+// Наша задача:
+//   1. Перестати приймати нові підключення.
+//   2. Повідомити активні кімнати про shutdown.
+//   3. Зупинити ігрові tick-loops.
+//   4. Дочекати pending PostgreSQL записів (аналітика).
+//   5. Exit(0) — щоб Railway зарахував shutdown як чистий.
+//
+// Failsafe: якщо graceful hang'не — форс-вихід через 8с.
+let _shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  console.log(`[shutdown] Received ${signal}, starting graceful shutdown...`);
+
+  // Failsafe — якщо щось зависне, примусово виходимо через 8с
+  const forceExit = setTimeout(() => {
+    console.log('[shutdown] Force exit after 8s timeout');
+    process.exit(1);
+  }, 8000);
+  forceExit.unref();
+
+  try {
+    // 1. Перестаємо слухати нові HTTP-з'єднання (існуючі WS живуть)
+    httpServer.close(() => console.log('[shutdown] HTTP server closed'));
+
+    // 2. Проходимось по всіх кімнатах — зупиняємо timers, повідомляємо клієнтів
+    let notifiedRooms = 0;
+    for (const [, room] of rooms) {
+      if (room.tickInterval)        { clearInterval(room.tickInterval);        room.tickInterval = null; }
+      if (room.matchTimerInterval)  { clearInterval(room.matchTimerInterval);  room.matchTimerInterval = null; }
+      if (room.countdownTimer)      { clearInterval(room.countdownTimer);      room.countdownTimer = null; }
+      if (room._slotDeleteTimers) {
+        for (const t of Object.values(room._slotDeleteTimers)) clearTimeout(t);
+        room._slotDeleteTimers = {};
+      }
+      if (room.status === 'playing' || room.status === 'countdown' || room.status === 'waiting') {
+        io.to(room.id).emit('server:shutdown', { reason: signal, graceMs: 3000 });
+        notifiedRooms++;
+      }
+    }
+    console.log(`[shutdown] Notified ${notifiedRooms} active rooms, waiting 2s for delivery...`);
+
+    // 3. Даємо подіям долетіти до клієнтів (socket.io flush)
+    await new Promise(r => setTimeout(r, 2000));
+
+    // 4. Закриваємо Socket.IO (відключає усі сокети)
+    await new Promise(resolve => {
+      io.close(() => { console.log('[shutdown] Socket.IO closed'); resolve(); });
+    });
+
+    // 5. Закриваємо PostgreSQL pool — waits for in-flight queries
+    if (pgPool) {
+      try {
+        await pgPool.end();
+        console.log('[shutdown] PostgreSQL pool closed');
+      } catch(e) {
+        console.error('[shutdown] pgPool.end error:', e.message);
+      }
+    }
+
+    console.log('[shutdown] Graceful shutdown complete. Exiting 0.');
+    clearTimeout(forceExit);
+    process.exit(0);
+  } catch(e) {
+    console.error('[shutdown] Error during shutdown:', e.message);
+    process.exit(1);
+  }
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+
+// Fatal errors — логуємо і намагаємось shutdown, не крашимо тихо
+process.on('uncaughtException', (err) => {
+  console.error('[fatal] uncaughtException:', err.stack || err);
+  gracefulShutdown('uncaughtException');
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[fatal] unhandledRejection:', reason);
+  // Не кидаємо shutdown для unhandledRejection — тільки логуємо,
+  // бо часто це некритичні Firebase/Firestore помилки.
+});
