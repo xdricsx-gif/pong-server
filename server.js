@@ -1199,6 +1199,7 @@ io.on('connection', (socket) => {
   // ── Обмін золото → срібло ──
   socket.on('shop:exchange', async ({ rateId }) => {
     if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
+    if (!socket.uid) return socket.emit('shop:error', { msg: 'auth_required' });
     const RATES = [
       { goldIn:1,   silverOut:100   },
       { goldIn:5,   silverOut:500   },
@@ -1208,22 +1209,28 @@ io.on('connection', (socket) => {
     ];
     const rate = RATES[parseInt(rateId)];
     if (!rate) return socket.emit('shop:error', { msg: 'invalid_rate' });
+
+    const privRef = db.collection('users_private').doc(socket.uid);
+
     try {
-      const privRef = db.collection('users_private').doc(socket.uid);
-      const snap = await privRef.get();
-      if (!snap.exists) return socket.emit('shop:error', { msg: 'user_not_found' });
-      const priv = snap.data();
-      if ((priv.gold || 0) < rate.goldIn)
-        return socket.emit('shop:error', { msg: 'not_enough_gold' });
-      await privRef.update({
-        gold:   admin.firestore.FieldValue.increment(-rate.goldIn),
-        silver: admin.firestore.FieldValue.increment(rate.silverOut),
+      const result = await db.runTransaction(async (tx) => {
+        const privSnap = await tx.get(privRef);
+        if (!privSnap.exists) throw { code: 'user_not_found' };
+        const priv = privSnap.data();
+
+        const gold   = priv.gold   || 0;
+        const silver = priv.silver || 0;
+        if (gold < rate.goldIn) throw { code: 'not_enough_gold' };
+
+        const newGold   = gold   - rate.goldIn;
+        const newSilver = silver + rate.silverOut;
+        tx.update(privRef, { gold: newGold, silver: newSilver });
+        return { gold: newGold, silver: newSilver };
       });
-      socket.emit('shop:exchanged', {
-        gold:   (priv.gold || 0) - rate.goldIn,
-        silver: (priv.silver || 0) + rate.silverOut,
-      });
+
+      socket.emit('shop:exchanged', result);
     } catch(e) {
+      if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
       console.error('shop:exchange', e.message);
       socket.emit('shop:error', { msg: 'server_error' });
     }
@@ -1238,25 +1245,39 @@ io.on('connection', (socket) => {
     const place = Math.max(0, Math.min(3, alive - 1));
     const delta = RATE[place] || -20;
     const today = new Date().toISOString().slice(0, 10);
+
+    const pubRef  = db.collection('users_public').doc(socket.uid);
+    const privRef = db.collection('users_private').doc(socket.uid);
+
     try {
-      const pubRef  = db.collection('users_public').doc(socket.uid);
-      const privRef = db.collection('users_private').doc(socket.uid);
-      const snap = await pubRef.get();
-      if (!snap.exists) return;
-      const pub = snap.data();
-      if (type === 'ranked') {
-        const newRating = Math.max(0, (pub.rating || 500) + delta);
-        await pubRef.update({
-          rating: newRating,
-          gamesPlayed: admin.firestore.FieldValue.increment(1),
-          ratingDate: today,
-          ratingToday: admin.firestore.FieldValue.increment(delta),
-        });
-        if (XP[place] > 0)
-          await privRef.update({ xp: admin.firestore.FieldValue.increment(XP[place]) });
-      }
+      await db.runTransaction(async (tx) => {
+        const pubSnap = await tx.get(pubRef);
+        if (!pubSnap.exists) throw { code: 'user_not_found' };
+        const pub = pubSnap.data();
+
+        if (type === 'ranked') {
+          const newRating = Math.max(0, (pub.rating || 500) + delta);
+          const newRatingToday = (pub.ratingToday || 0) + delta;
+          const newGamesPlayed = (pub.gamesPlayed || 0) + 1;
+          tx.update(pubRef, {
+            rating: newRating,
+            gamesPlayed: newGamesPlayed,
+            ratingDate: today,
+            ratingToday: newRatingToday,
+          });
+          if (XP[place] > 0) {
+            // Для privRef треба теж прочитати перед write (Firestore tx rule)
+            const privSnap = await tx.get(privRef);
+            if (privSnap.exists) {
+              const newXp = (privSnap.data().xp || 0) + XP[place];
+              tx.update(privRef, { xp: newXp });
+            }
+          }
+        }
+      });
       socket.emit('shop:pending_resolved', { type, place, delta });
     } catch(e) {
+      if (e && e.code) return; // silent, user_not_found just ignore
       console.error('shop:resolve_pending', e.message);
     }
   });
@@ -1597,43 +1618,48 @@ function registerShopHandlers(socket) {
   // ── Купівля ракетки ──
   socket.on('shop:buy_paddle', async ({ paddleId }) => {
     if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
+    if (!socket.uid) return socket.emit('shop:error', { msg: 'auth_required' });
     const pid = parseInt(paddleId);
     const priceDef = PADDLE_PRICES_SRV[pid];
     if (!priceDef) return socket.emit('shop:error', { msg: 'invalid_paddle' });
     if (priceDef.cur === 'free') return socket.emit('shop:error', { msg: 'already_free' });
 
+    const privRef = db.collection('users_private').doc(socket.uid);
+    const pubRef  = db.collection('users_public').doc(socket.uid);
+
     try {
-      const privRef = db.collection('users_private').doc(socket.uid);
-      const pubRef  = db.collection('users_public').doc(socket.uid);
-      const privSnap = await privRef.get();
-      if (!privSnap.exists) return socket.emit('shop:error', { msg: 'user_not_found' });
-      const priv = privSnap.data();
+      // ── ТРАНЗАКЦІЯ: атомарно read → check → write ──
+      // Firestore автоматично re-tryить, якщо документ змінився між read і write
+      const result = await db.runTransaction(async (tx) => {
+        const privSnap = await tx.get(privRef);
+        if (!privSnap.exists) throw { code: 'user_not_found' };
+        const priv = privSnap.data();
 
-      // Перевірка: вже куплено?
-      if ((priv.ownedPaddles || []).includes(pid))
-        return socket.emit('shop:error', { msg: 'already_owned' });
+        if ((priv.ownedPaddles || []).includes(pid)) throw { code: 'already_owned' };
 
-      // Перевірка балансу
-      if (priceDef.cur === 'silver' && (priv.silver || 0) < priceDef.price)
-        return socket.emit('shop:error', { msg: 'not_enough_silver' });
-      if (priceDef.cur === 'gold' && (priv.gold || 0) < priceDef.price)
-        return socket.emit('shop:error', { msg: 'not_enough_gold' });
+        const silver = priv.silver || 0;
+        const gold   = priv.gold   || 0;
+        if (priceDef.cur === 'silver' && silver < priceDef.price) throw { code: 'not_enough_silver' };
+        if (priceDef.cur === 'gold'   && gold   < priceDef.price) throw { code: 'not_enough_gold' };
 
-      const privUpd = { ownedPaddles: [...(priv.ownedPaddles||[]), pid] };
-      if (priceDef.cur === 'silver') privUpd.silver = admin.firestore.FieldValue.increment(-priceDef.price);
-      if (priceDef.cur === 'gold')   privUpd.gold   = admin.firestore.FieldValue.increment(-priceDef.price);
+        const newOwned = [...(priv.ownedPaddles || []), pid];
+        const privUpd = { ownedPaddles: newOwned };
+        let newSilver = silver, newGold = gold;
+        if (priceDef.cur === 'silver') { privUpd.silver = silver - priceDef.price; newSilver = privUpd.silver; }
+        if (priceDef.cur === 'gold')   { privUpd.gold   = gold   - priceDef.price; newGold   = privUpd.gold; }
 
-      await Promise.all([
-        privRef.update(privUpd),
-        pubRef.update({ paddleId: pid }),
-      ]);
+        tx.update(privRef, privUpd);
+        tx.update(pubRef, { paddleId: pid });
 
-      const newBalance = priceDef.cur === 'silver'
-        ? { silver: (priv.silver || 0) - priceDef.price }
-        : { gold: (priv.gold || 0) - priceDef.price };
+        return { paddleId: pid, silver: newSilver, gold: newGold };
+      });
 
-      socket.emit('shop:bought_paddle', { paddleId: pid, ...newBalance });
+      socket.emit('shop:bought_paddle', {
+        paddleId: result.paddleId,
+        ...(priceDef.cur === 'silver' ? { silver: result.silver } : { gold: result.gold }),
+      });
     } catch(e) {
+      if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
       console.error('shop:buy_paddle', e.message);
       socket.emit('shop:error', { msg: 'server_error' });
     }
@@ -1642,43 +1668,48 @@ function registerShopHandlers(socket) {
   // ── Апгрейд модуля ──
   socket.on('shop:upgrade_hangar', async ({ paddleId, partId }) => {
     if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
+    if (!socket.uid) return socket.emit('shop:error', { msg: 'auth_required' });
     const pid = parseInt(paddleId);
     const VALID_PARTS = ['w','spd','fr','bm','er','fd'];
     if (!VALID_PARTS.includes(partId)) return socket.emit('shop:error', { msg: 'invalid_part' });
 
+    const privRef = db.collection('users_private').doc(socket.uid);
+
     try {
-      const privRef = db.collection('users_private').doc(socket.uid);
-      const privSnap = await privRef.get();
-      if (!privSnap.exists) return socket.emit('shop:error', { msg: 'user_not_found' });
-      const priv = privSnap.data();
+      const result = await db.runTransaction(async (tx) => {
+        const privSnap = await tx.get(privRef);
+        if (!privSnap.exists) throw { code: 'user_not_found' };
+        const priv = privSnap.data();
 
-      const hangars = priv.hangars || {};
-      const currentLv = ((hangars[pid] || {})[partId]) || 1;
-      if (currentLv >= 10) return socket.emit('shop:error', { msg: 'max_level' });
+        const hangars = priv.hangars || {};
+        const currentLv = ((hangars[pid] || {})[partId]) || 1;
+        if (currentLv >= 10) throw { code: 'max_level' };
 
-      const cost = HANGAR_COSTS_SRV[currentLv];
-      if (!cost) return socket.emit('shop:error', { msg: 'invalid_level' });
+        const cost = HANGAR_COSTS_SRV[currentLv];
+        if (!cost) throw { code: 'invalid_level' };
 
-      // Перевірка балансу
-      if (cost.cur === 'silver' && (priv.silver || 0) < cost.price)
-        return socket.emit('shop:error', { msg: 'not_enough_silver' });
-      if (cost.cur === 'gold' && (priv.gold || 0) < cost.price)
-        return socket.emit('shop:error', { msg: 'not_enough_gold' });
+        const silver = priv.silver || 0;
+        const gold   = priv.gold   || 0;
+        if (cost.cur === 'silver' && silver < cost.price) throw { code: 'not_enough_silver' };
+        if (cost.cur === 'gold'   && gold   < cost.price) throw { code: 'not_enough_gold' };
 
-      const newLv = currentLv + 1;
-      const upd = {};
-      upd[`hangars.${pid}.${partId}`] = newLv;
-      if (cost.cur === 'silver') upd.silver = admin.firestore.FieldValue.increment(-cost.price);
-      if (cost.cur === 'gold')   upd.gold   = admin.firestore.FieldValue.increment(-cost.price);
+        const newLv = currentLv + 1;
+        const upd = {};
+        upd[`hangars.${pid}.${partId}`] = newLv;
+        let newSilver = silver, newGold = gold;
+        if (cost.cur === 'silver') { upd.silver = silver - cost.price; newSilver = upd.silver; }
+        if (cost.cur === 'gold')   { upd.gold   = gold   - cost.price; newGold   = upd.gold; }
 
-      await privRef.update(upd);
+        tx.update(privRef, upd);
+        return { paddleId: pid, partId, newLevel: newLv, silver: newSilver, gold: newGold, cur: cost.cur };
+      });
 
-      const newBalance = cost.cur === 'silver'
-        ? { silver: (priv.silver || 0) - cost.price }
-        : { gold: (priv.gold || 0) - cost.price };
-
-      socket.emit('shop:upgraded', { paddleId: pid, partId, newLevel: newLv, ...newBalance });
+      socket.emit('shop:upgraded', {
+        paddleId: result.paddleId, partId: result.partId, newLevel: result.newLevel,
+        ...(result.cur === 'silver' ? { silver: result.silver } : { gold: result.gold }),
+      });
     } catch(e) {
+      if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
       console.error('shop:upgrade_hangar', e.message);
       socket.emit('shop:error', { msg: 'server_error' });
     }
@@ -1687,26 +1718,30 @@ function registerShopHandlers(socket) {
   // ── Купівля енергії ──
   socket.on('shop:buy_energy', async () => {
     if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
+    if (!socket.uid) return socket.emit('shop:error', { msg: 'auth_required' });
+    const privRef = db.collection('users_private').doc(socket.uid);
+
     try {
-      const privRef = db.collection('users_private').doc(socket.uid);
-      const privSnap = await privRef.get();
-      if (!privSnap.exists) return socket.emit('shop:error', { msg: 'user_not_found' });
-      const priv = privSnap.data();
+      const result = await db.runTransaction(async (tx) => {
+        const privSnap = await tx.get(privRef);
+        if (!privSnap.exists) throw { code: 'user_not_found' };
+        const priv = privSnap.data();
 
-      if ((priv.gold || 0) < ENERGY_GOLD_COST_SRV)
-        return socket.emit('shop:error', { msg: 'not_enough_gold' });
+        const gold = priv.gold || 0;
+        if (gold < ENERGY_GOLD_COST_SRV) throw { code: 'not_enough_gold' };
 
-      await privRef.update({
-        gold: admin.firestore.FieldValue.increment(-ENERGY_GOLD_COST_SRV),
-        energy: 100,
-        energyLastRegen: Date.now(),
+        const newGold = gold - ENERGY_GOLD_COST_SRV;
+        tx.update(privRef, {
+          gold: newGold,
+          energy: 100,
+          energyLastRegen: Date.now(),
+        });
+        return { gold: newGold, energy: 100 };
       });
 
-      socket.emit('shop:energy_bought', {
-        gold: (priv.gold || 0) - ENERGY_GOLD_COST_SRV,
-        energy: 100,
-      });
+      socket.emit('shop:energy_bought', result);
     } catch(e) {
+      if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
       console.error('shop:buy_energy', e.message);
       socket.emit('shop:error', { msg: 'server_error' });
     }
