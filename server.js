@@ -126,26 +126,39 @@ async function trackGameEnd(room, winnerSlot, places, isTraining, ratingDeltas =
     const mode = isTraining ? 'training' : (botsCount > 0 ? 'ranked_bots' : 'ranked');
     const gs = room.game;
 
-    // Для паралельності: збираємо всі DB-виклики і виконуємо через Promise.all
-    const playerOps = [];
+    // Збираємо учасників: активні + ті, хто вийшов/відключився (uid у _disconnected)
+    const participants = []; // {uid, slot, rating}
+    const seenSlots = new Set();
     for (const [sid, player] of Object.entries(room.players)) {
       if (!player.uid) continue;
-      const placeIdx = places.indexOf(player.slot);
-      const goalsConceded = gs ? (ML - (gs.lives?.[player.slot] ?? ML)) : null;
-      const ratingDelta = ratingDeltas[player.slot] != null ? ratingDeltas[player.slot] : null;
-      const newRating = (typeof player.rating === 'number' && ratingDelta != null)
-        ? Math.max(0, player.rating + ratingDelta)
+      participants.push({ uid: player.uid, slot: player.slot, rating: player.rating });
+      seenSlots.add(player.slot);
+    }
+    if (room._disconnected) {
+      for (const [slotStr, info] of Object.entries(room._disconnected)) {
+        const slot = parseInt(slotStr);
+        if (seenSlots.has(slot) || !info || !info.uid) continue;
+        participants.push({ uid: info.uid, slot, rating: info.rating });
+        seenSlots.add(slot);
+      }
+    }
+
+    const playerOps = [];
+    for (const p of participants) {
+      const placeIdx = places.indexOf(p.slot);
+      const goalsConceded = gs ? (ML - (gs.lives?.[p.slot] ?? ML)) : null;
+      const ratingDelta = ratingDeltas[p.slot] != null ? ratingDeltas[p.slot] : null;
+      const newRating = (typeof p.rating === 'number' && ratingDelta != null)
+        ? Math.max(0, p.rating + ratingDelta)
         : null;
 
-      // 1. Подія game_end — з rating_delta
       playerOps.push(trackEvent('game_end', {
-        uid: player.uid, roomId: room.id, mode,
+        uid: p.uid, roomId: room.id, mode,
         place: placeIdx + 1, durationSec,
         botsCount, playersCount, goalsConceded,
         ratingDelta,
       }));
 
-      // 2. Update agregates + peak_rating (одним запитом)
       playerOps.push(pgPool.query(
         `UPDATE players SET
           total_games = total_games + 1,
@@ -154,13 +167,12 @@ async function trackGameEnd(room, winnerSlot, places, isTraining, ratingDeltas =
           peak_rating = GREATEST(peak_rating, COALESCE($4, peak_rating)),
           last_seen = NOW()
          WHERE uid = $1`,
-        [player.uid, placeIdx === 0 ? 1 : 0, durationSec || 0, newRating]
+        [p.uid, placeIdx === 0 ? 1 : 0, durationSec || 0, newRating]
       ));
     }
 
     await Promise.all(playerOps);
 
-    // Daily stats
     if (durationSec) {
       await pgPool.query(
         `INSERT INTO daily_stats (date, games_played, total_playtime_sec)
@@ -826,6 +838,10 @@ function createGameState(room) {
     energy: { 0: 1, 1: 1, 2: 1, 3: 1 },
     fields: { 0:{active:false,t:0,r:0}, 1:{active:false,t:0,r:0}, 2:{active:false,t:0,r:0}, 3:{active:false,t:0,r:0} },
     eliminated: { 0: false, 1: false, 2: false, 3: false },
+    // ── Єдиний хронологічний журнал вибуття (source of truth для ranking) ──
+    // Перший вибулий = 4 місце, останній вибулий = 2 місце, ще живий = 1.
+    // Заповнюється через markEliminated() — незалежно від причини (lives/leave/timeout).
+    eliminationOrder: [],
     botTargets: { 0: W/2, 1: W/2, 2: H/2, 3: H/2 },
     gameOver: false, winner: null, tick: 0,
   };
@@ -836,6 +852,20 @@ function createGameState(room) {
     gs.respawns.push({ timer: PREGAME_DELAY + 3000 + i*2000, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd });
   }
   return gs;
+}
+
+// Єдиний source of truth для вибуття гравця.
+// reason: 'lives' | 'leave' | 'timeout' — для логів.
+// Повертає true якщо elimination відбулась (false = уже був eliminated).
+function markEliminated(gs, slot, reason) {
+  if (!gs || gs.eliminated[slot]) return false;
+  gs.eliminated[slot] = true;
+  gs.lives[slot] = 0;
+  if (!gs.eliminationOrder.includes(slot)) {
+    gs.eliminationOrder.push(slot);
+  }
+  console.log(`[elim] slot=${slot} reason=${reason} order=[${gs.eliminationOrder.join(',')}]`);
+  return true;
 }
 
 function activeSlots(gs) { return SLOTS.filter(s => !gs.eliminated[s]); }
@@ -994,7 +1024,7 @@ function tick(room) {
       if (gs.eliminated[slot]) return false;
       gs.scores[slot]++; gs.lives[slot]--;
       if (gs.lives[slot] <= 0) {
-        gs.eliminated[slot] = true;
+        markEliminated(gs, slot, 'lives');
         // Якщо відключений гравець вибув — відміняємо його таймер реконекту
         if (room._disconnected && room._disconnected[slot]) {
           if (room._slotDeleteTimers && room._slotDeleteTimers[slot]) {
@@ -1133,14 +1163,33 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
   const today = new Date().toISOString().slice(0, 10);
   const batch = db.batch();
 
+  // ── Збираємо ВСІХ учасників матчу з uid: активних + тих, хто вийшов/відключився ──
+  // Після leave()/timeout гравця нема в room.players, але uid + rating у _disconnected[slot].
+  // Без цього блоку волонтарно-вийшовший гравець не отримав би -20 рейтингу.
+  const participants = []; // {uid, slot, rating}
+  const claimedSlots = new Set();
+
   for (const [sid, player] of Object.entries(room.players)) {
     if (!player.uid || player.isBot) continue;
-    const s = player.slot;
-    const pubRef = db.collection('users_public').doc(player.uid);
-    const privRef = db.collection('users_private').doc(player.uid);
+    participants.push({ uid: player.uid, slot: player.slot, rating: player.rating || 500 });
+    claimedSlots.add(player.slot);
+  }
+  if (room._disconnected) {
+    for (const [slotStr, info] of Object.entries(room._disconnected)) {
+      const slot = parseInt(slotStr);
+      if (claimedSlots.has(slot)) continue; // активний гравець вже взятий
+      if (!info || !info.uid) continue;
+      participants.push({ uid: info.uid, slot, rating: info.rating || 500 });
+      claimedSlots.add(slot);
+    }
+  }
+
+  for (const p of participants) {
+    const s = p.slot;
+    const pubRef = db.collection('users_public').doc(p.uid);
+    const privRef = db.collection('users_private').doc(p.uid);
 
     if (isTraining) {
-      // Тренування — XP і срібло
       const tr = trainingRewards;
       if (!tr) continue;
       const place = s === winnerSlot ? 0 : 1;
@@ -1154,13 +1203,11 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
       });
       batch.update(pubRef, { gamesPlayed: admin.firestore.FieldValue.increment(1) });
     } else {
-      // Рейтингова гра — рейтинг, XP, gamesPlayed, wins
-      const delta = ratingDeltas[s] || -20;
+      const delta = ratingDeltas[s] != null ? ratingDeltas[s] : -20;
       const placeIdx = places.indexOf(s);
       const XP_MAP = [100, 50, 20, 0];
       const xp = XP_MAP[placeIdx] || 0;
-      const currentRating = player.rating || 500;
-      const newRating = Math.max(0, currentRating + delta);
+      const newRating = Math.max(0, p.rating + delta);
 
       const pubUpd = {
         rating: newRating,
@@ -1168,7 +1215,6 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
         ratingDate: today,
       };
       if (delta > 0) pubUpd.wins = admin.firestore.FieldValue.increment(1);
-      // ratingToday — накопичуємо за день
       pubUpd.ratingToday = admin.firestore.FieldValue.increment(delta);
 
       batch.update(pubRef, pubUpd);
@@ -1178,7 +1224,7 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
 
   try {
     await batch.commit();
-    console.log('[rewards] committed for room', room.id);
+    console.log(`[rewards] committed for room ${room.id} (${participants.length} participants)`);
   } catch(e) {
     console.error('[rewards] batch error:', e.message);
   }
@@ -1195,13 +1241,26 @@ function endGame(room, winnerSlot) {
     room._slotDeleteTimers = {};
   }
   const RATING_BY_PLACE = [50, 20, 5, -20];
-  const ML_END = 10;
-  // Місця визначаються за кількістю залишених lives (більше = менше пропустив = вище місце)
-  // Переможець вже визначений, решта сортується за lives (desc)
+
+  // ── SINGLE SOURCE OF TRUTH для ranking ──
+  // 1 місце = переможець (ще живий або з найбільше lives якщо по таймеру)
+  // 2-4 місце = ОБЕРНЕНИЙ порядок вибуття (останній вибулий = 2, перший вибулий = 4)
+  // Якщо матч скінчився по таймеру з кількома живими — живі йдуть за lives desc після переможця.
   const places = [winnerSlot];
-  const others = SLOTS.filter(s => s !== winnerSlot)
-    .sort((a, b) => (gs.lives[b] ?? 0) - (gs.lives[a] ?? 0));
-  places.push(...others);
+  const alive = SLOTS.filter(s => !gs.eliminated[s] && s !== winnerSlot);
+  // Живі, що не winner — за lives desc (тай-брейк: хто менше scores = менше пропустив)
+  alive.sort((a, b) => (gs.lives[b] - gs.lives[a]) || (gs.scores[a] - gs.scores[b]));
+  places.push(...alive);
+  // Вибулі у зворотному порядку
+  const elimReversed = [...gs.eliminationOrder].reverse();
+  for (const s of elimReversed) {
+    if (!places.includes(s)) places.push(s);
+  }
+  // Безпека: добиваємо будь-які залишки (не повинно спрацювати)
+  for (const s of SLOTS) {
+    if (!places.includes(s)) places.push(s);
+  }
+
   const ratingDeltas = {};
   places.forEach((slot, idx) => { ratingDeltas[slot] = RATING_BY_PLACE[idx] || -20; });
   const isTraining = Object.values(room.players).some(p => p.trainingMode);
@@ -1664,68 +1723,94 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('mm:cancel', () => leave());
-  socket.on('disconnect', () => leave());
+  socket.on('mm:cancel', () => leave({ voluntary: true }));
+  // Явний вихід з кнопки — одразу eliminates
+  socket.on('leave_game', () => leave({ voluntary: true }));
+  // Raw disconnect (transport close, ping timeout, закрив таб) — даємо 30с на rejoin
+  socket.on('disconnect', () => leave({ voluntary: false }));
 
 
 
-  function leave() {
+  function leave(opts = {}) {
+    const voluntary = opts.voluntary === true;
     if (!myRoom) return;
     const room = myRoom;
     const slot = mySlot;
     const pinfo = room.players[socket.id];
-    clearSlotPlayer(room, socket.id);
     socket.leave(room.id);
+
+    if (room.status === 'playing' && slot !== null && pinfo && room.game && !room.game.gameOver) {
+      // ── СТРАТЕГІЯ ──
+      // voluntary (натиснув "Вийти") → одразу markEliminated. Блокує експлойт.
+      // non-voluntary (disconnect) → 30с grace на rejoin. Після — markEliminated.
+      if (voluntary) {
+        markEliminated(room.game, slot, 'leave');
+        // Дані для commitRewards (uid потрібен для запису рейтингу)
+        room._disconnected = room._disconnected || {};
+        room._disconnected[slot] = {
+          nick: pinfo.nick, rating: pinfo.rating, uid: pinfo.uid,
+          paddleStats: pinfo.paddleStats,
+          leftVoluntarily: true,
+        };
+        clearSlotPlayer(room, socket.id);
+        myRoom = null; mySlot = null;
+        io.to(room.id).emit('player:left', { slot });
+
+        const active = activeSlots(room.game);
+        if (active.length === 1) {
+          endGame(room, active[0]);
+        } else if (active.length === 0) {
+          if (room.tickInterval) clearInterval(room.tickInterval);
+          if (room.matchTimerInterval) clearInterval(room.matchTimerInterval);
+          rooms.delete(room.id);
+        }
+        return;
+      }
+
+      // ── Raw disconnect — чекаємо 30с на rejoin ──
+      room._disconnected = room._disconnected || {};
+      room._disconnected[slot] = {
+        nick: pinfo.nick, rating: pinfo.rating, uid: pinfo.uid,
+        paddleStats: pinfo.paddleStats,
+        leftVoluntarily: false,
+      };
+      clearSlotPlayer(room, socket.id);
+      myRoom = null; mySlot = null;
+      io.to(room.id).emit('player:disconnected', { slot, reconnectTimeout: 30 });
+
+      // 30с timer: якщо не повернувся — markEliminated
+      room._slotDeleteTimers = room._slotDeleteTimers || {};
+      room._slotDeleteTimers[slot] = setTimeout(() => {
+        // Якщо rejoin відбувся — _disconnected[slot] вже прибрано з rejoin handler
+        if (!room._disconnected || !room._disconnected[slot]) return;
+        console.log(`Room ${room.id}: slot ${slot} timed out → markEliminated`);
+        delete room._slotDeleteTimers[slot];
+        // Гравець НЕ повернувся → elim (залишаємо дані в _disconnected для commitRewards!)
+        if (room.game && !room.game.gameOver) {
+          markEliminated(room.game, slot, 'timeout');
+          io.to(room.id).emit('player:left', { slot });
+          const active = activeSlots(room.game);
+          if (active.length === 1) {
+            endGame(room, active[0]);
+          } else if (active.length === 0) {
+            if (room.tickInterval) clearInterval(room.tickInterval);
+            if (room.matchTimerInterval) clearInterval(room.matchTimerInterval);
+            rooms.delete(room.id);
+          }
+        }
+      }, 30000);
+      return;
+    }
+
+    // Не під час playing — звичайне видалення
+    clearSlotPlayer(room, socket.id);
     myRoom = null; mySlot = null;
 
     const count = Object.keys(room.players).length;
-
-    if (room.status === 'playing' && slot !== null && pinfo) {
-      // ── НОВА ЛОГІКА: зберігаємо дані гравця і чекаємо 30с ──
-      room._disconnected = room._disconnected || {};
-      room._disconnected[slot] = {
-        nick: pinfo.nick,
-        rating: pinfo.rating,
-        uid: pinfo.uid,
-        paddleStats: pinfo.paddleStats, // ← зберігаємо прокачку!
-      };
-
-      // ── Сповіщаємо інших що гравець відключився (але гра продовжується!) ──
-      io.to(room.id).emit('player:disconnected', { slot, reconnectTimeout: 30 });
-
-      // ── Таймер 30с для цього конкретного слоту ──
-      room._slotDeleteTimers = room._slotDeleteTimers || {};
-      room._slotDeleteTimers[slot] = setTimeout(() => {
-        if (!room._disconnected || !room._disconnected[slot]) return; // вже повернувся
-        console.log(`Room ${room.id}: slot ${slot} timed out`);
-
-        // Визначаємо місце гравця на момент кіку
-        const gs = room.game;
-        const places = gs ? SLOTS.filter(s=>!gs.eliminated[s])
-          .sort((a,b)=>(gs.scores[b]||0)-(gs.scores[a]||0)) : [];
-        const placeIdx = places.indexOf(slot);
-        const RATING_BY_PLACE = [50, 20, 5, -20];
-        const ratingDelta = RATING_BY_PLACE[placeIdx] !== undefined ? RATING_BY_PLACE[placeIdx] : -20;
-
-        delete room._disconnected[slot];
-        delete room._slotDeleteTimers[slot];
-
-        // ── Тепер надсилаємо player:left з рейтингом ──
-        io.to(room.id).emit('player:left', { slot, ratingDelta });
-
-        // Перевіряємо чи кімната пуста після кіку
-        const realPlayers = Object.keys(room.players).length;
-        const stillDisconnected = Object.keys(room._disconnected || {}).length;
-        if (realPlayers === 0 && stillDisconnected === 0) {
-          if (room.tickInterval) clearInterval(room.tickInterval);
-          io.to(room.id).emit('room:closed');
-          rooms.delete(room.id);
-        }
-      }, 30000);
-
-    } else if (count === 0) {
+    if (count === 0) {
       if (room.tickInterval) clearInterval(room.tickInterval);
       if (room.countdownTimer) clearInterval(room.countdownTimer);
+      if (room.matchTimerInterval) clearInterval(room.matchTimerInterval);
       rooms.delete(room.id);
     } else {
       broadcastLobby(room);
