@@ -57,6 +57,11 @@ async function initPostgres() {
         total_playtime_sec BIGINT DEFAULT 0
       );
     `);
+    // Idempotent migrations — для кейсу, якщо таблиці вже створені без цих полів
+    await pgPool.query(`
+      ALTER TABLE players    ADD COLUMN IF NOT EXISTS peak_rating INT DEFAULT 500;
+      ALTER TABLE game_events ADD COLUMN IF NOT EXISTS rating_delta INT;
+    `);
     console.log('[Analytics] PostgreSQL connected and tables ready');
   } catch(e) {
     console.error('[Analytics] PostgreSQL init error:', e.message);
@@ -77,67 +82,83 @@ async function trackEvent(eventType, data = {}) {
   } catch(e) { console.error('[Analytics] trackEvent error:', e.message); }
 }
 
-async function trackPlayerSeen(uid, isNew = false) {
+// Автоматично визначає, чи це перше входження UID.
+// RETURNING xmax — якщо 0, рядок щойно вставлений (новий гравець);
+// якщо ненульове — upsert (гравець існував).
+async function trackPlayerSeen(uid, platform = null) {
   if (!pgPool || !uid) return;
   try {
+    const res = await pgPool.query(
+      `INSERT INTO players (uid) VALUES ($1)
+       ON CONFLICT (uid) DO UPDATE SET last_seen=NOW()
+       RETURNING (xmax = 0) AS is_new`,
+      [uid]
+    );
+    const isNew = res.rows[0] && res.rows[0].is_new === true;
+
+    // Daily active users + (якщо новий) daily new registrations.
     if (isNew) {
-      await pgPool.query(
-        `INSERT INTO players (uid) VALUES ($1) ON CONFLICT (uid) DO UPDATE SET last_seen=NOW()`,
-        [uid]
-      );
-      // Daily new registrations
       await pgPool.query(
         `INSERT INTO daily_stats (date, new_registrations) VALUES (CURRENT_DATE, 1)
          ON CONFLICT (date) DO UPDATE SET new_registrations = daily_stats.new_registrations + 1`
       );
-    } else {
-      await pgPool.query(
-        `INSERT INTO players (uid) VALUES ($1)
-         ON CONFLICT (uid) DO UPDATE SET last_seen=NOW()`,
-        [uid]
-      );
     }
-    // Daily active users
     await pgPool.query(
       `INSERT INTO daily_stats (date, dau) VALUES (CURRENT_DATE, 1)
        ON CONFLICT (date) DO UPDATE
        SET dau = (SELECT COUNT(DISTINCT uid) FROM game_events
                   WHERE ts::date = CURRENT_DATE AND uid IS NOT NULL)`,
     );
+
+    // Зберігаємо подію реєстрації з платформою (для ретеншн-аналізу).
+    if (isNew) {
+      await trackEvent('player_registered', { uid, platform });
+    }
   } catch(e) { console.error('[Analytics] trackPlayerSeen error:', e.message); }
 }
 
-async function trackGameEnd(room, winnerSlot, places, isTraining) {
+async function trackGameEnd(room, winnerSlot, places, isTraining, ratingDeltas = {}) {
   if (!pgPool) return;
   try {
     const durationSec = room.startedAt ? Math.round((Date.now() - room.startedAt) / 1000) : null;
     const botsCount = Object.keys(room.bots || {}).filter(s => room.bots[s]).length;
     const playersCount = Object.keys(room.players).length;
     const mode = isTraining ? 'training' : (botsCount > 0 ? 'ranked_bots' : 'ranked');
+    const gs = room.game;
 
+    // Для паралельності: збираємо всі DB-виклики і виконуємо через Promise.all
+    const playerOps = [];
     for (const [sid, player] of Object.entries(room.players)) {
       if (!player.uid) continue;
       const placeIdx = places.indexOf(player.slot);
-      const gs = room.game;
-      const goalsConceded = gs ? (10 - (gs.lives?.[player.slot] ?? 10)) : null;
+      const goalsConceded = gs ? (ML - (gs.lives?.[player.slot] ?? ML)) : null;
+      const ratingDelta = ratingDeltas[player.slot] != null ? ratingDeltas[player.slot] : null;
+      const newRating = (typeof player.rating === 'number' && ratingDelta != null)
+        ? Math.max(0, player.rating + ratingDelta)
+        : null;
 
-      await trackEvent('game_end', {
+      // 1. Подія game_end — з rating_delta
+      playerOps.push(trackEvent('game_end', {
         uid: player.uid, roomId: room.id, mode,
         place: placeIdx + 1, durationSec,
         botsCount, playersCount, goalsConceded,
-      });
+        ratingDelta,
+      }));
 
-      // Оновлюємо статистику гравця
-      await pgPool.query(
+      // 2. Update agregates + peak_rating (одним запитом)
+      playerOps.push(pgPool.query(
         `UPDATE players SET
           total_games = total_games + 1,
           total_wins = total_wins + $2,
           total_playtime_sec = total_playtime_sec + $3,
+          peak_rating = GREATEST(peak_rating, COALESCE($4, peak_rating)),
           last_seen = NOW()
          WHERE uid = $1`,
-        [player.uid, placeIdx === 0 ? 1 : 0, durationSec || 0]
-      );
+        [player.uid, placeIdx === 0 ? 1 : 0, durationSec || 0, newRating]
+      ));
     }
+
+    await Promise.all(playerOps);
 
     // Daily stats
     if (durationSec) {
@@ -1194,7 +1215,7 @@ function endGame(room, winnerSlot) {
   // Записуємо нагороди на сервері — клієнт більше не пише рейтинг/XP/срібло після матчу
   commitRewards(room, winnerSlot, places, ratingDeltas, isTraining, trainingRewards);
   // Аналітика
-  trackGameEnd(room, winnerSlot, places, isTraining);
+  trackGameEnd(room, winnerSlot, places, isTraining, ratingDeltas);
 
   io.to(room.id).emit('game:over', {
     winnerSlot, players: buildPlayers(room),
@@ -1242,6 +1263,21 @@ function startGame(room) {
   }
   room.tickInterval = setInterval(() => tick(room), TICK_MS);
   room.startedAt = Date.now(); // для підрахунку тривалості матчу
+
+  // ── Аналітика: подія старту матчу (для drop-off rate) ──
+  try {
+    const botsCount = Object.keys(room.bots || {}).filter(s => room.bots[s]).length;
+    const realPlayersCount = Object.keys(room.players).length;
+    const isTrainingRoom = Object.values(room.players).some(p => p.trainingMode);
+    const mode = isTrainingRoom ? 'training' : (botsCount > 0 ? 'ranked_bots' : 'ranked');
+    for (const player of Object.values(room.players)) {
+      if (!player.uid) continue;
+      trackEvent('match_start', {
+        uid: player.uid, roomId: room.id, mode,
+        botsCount, playersCount: realPlayersCount,
+      });
+    }
+  } catch(e) { /* analytics не повинно ламати gameplay */ }
 
   // ── Серверний таймер матчу — 3 хвилини ──
   const MATCH_DURATION_MS = 3 * 60 * 1000;
@@ -1359,6 +1395,10 @@ io.on('connection', (socket) => {
       });
 
       socket.emit('shop:exchanged', result);
+      trackEvent('purchase', {
+        uid: socket.uid, kind: 'exchange', item: `gold_to_silver_${rate.goldIn}`,
+        amount: rate.goldIn, cur: 'gold',
+      });
     } catch(e) {
       if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
       console.error('shop:exchange', e.message);
@@ -1412,7 +1452,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('mm:join', async ({ nick, rating, uid, idToken, wins, games, paddleStats, trainingMode, avatarId }) => {
+  socket.on('mm:join', async ({ nick, rating, uid, idToken, wins, games, paddleStats, trainingMode, avatarId, platform }) => {
     // ── SECURITY: верифікуємо idToken, витягуємо реальний uid ──
     const verifiedUid = await resolveUid({ idToken, fallbackUid: uid });
     if (admin && !verifiedUid && !trainingMode) {
@@ -1423,7 +1463,7 @@ io.on('connection', (socket) => {
     // Використовуємо verified uid (або fallback в dev-режимі без Admin)
     const realUid = verifiedUid;
     if (realUid) socket.uid = realUid; // для shop handlers
-    if (realUid && !trainingMode) trackPlayerSeen(realUid);
+    if (realUid && !trainingMode) trackPlayerSeen(realUid, platform);
 
     // ── SECURITY: ігноруємо клієнтський paddleStats і rating ──
     // Завантажуємо з Firestore (server-authoritative).
@@ -1788,6 +1828,11 @@ function registerShopHandlers(socket) {
         paddleId: result.paddleId,
         ...(priceDef.cur === 'silver' ? { silver: result.silver } : { gold: result.gold }),
       });
+      // Аналітика покупки
+      trackEvent('purchase', {
+        uid: socket.uid, kind: 'paddle', item: pid,
+        amount: priceDef.price, cur: priceDef.cur,
+      });
     } catch(e) {
       if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
       console.error('shop:buy_paddle', e.message);
@@ -1838,6 +1883,10 @@ function registerShopHandlers(socket) {
         paddleId: result.paddleId, partId: result.partId, newLevel: result.newLevel,
         ...(result.cur === 'silver' ? { silver: result.silver } : { gold: result.gold }),
       });
+      trackEvent('purchase', {
+        uid: socket.uid, kind: 'hangar', item: `${result.paddleId}:${result.partId}:${result.newLevel}`,
+        amount: HANGAR_COSTS_SRV[result.newLevel - 1]?.price, cur: result.cur,
+      });
     } catch(e) {
       if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
       console.error('shop:upgrade_hangar', e.message);
@@ -1870,6 +1919,10 @@ function registerShopHandlers(socket) {
       });
 
       socket.emit('shop:energy_bought', result);
+      trackEvent('purchase', {
+        uid: socket.uid, kind: 'energy', item: 'refill_100',
+        amount: ENERGY_GOLD_COST_SRV, cur: 'gold',
+      });
     } catch(e) {
       if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
       console.error('shop:buy_energy', e.message);
