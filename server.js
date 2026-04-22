@@ -370,6 +370,37 @@ async function loadValidatedRating(uid) {
   }
 }
 
+// ══════════════════════════════════════════════════════
+// FIREBASE ID TOKEN VERIFICATION
+// ══════════════════════════════════════════════════════
+// Клієнт передає idToken разом з критичними подіями (mm:join, rejoin, shop:auth).
+// Сервер верифікує його через Admin SDK і витягує реальний uid.
+// Це блокує підміну чужого uid.
+//
+// Повертає { uid } при успіху, null при помилці.
+// Якщо Admin SDK недоступний (db=null) — fallback без верифікації (dev режим).
+async function verifyAuthToken(idToken) {
+  if (!admin) return null;                // Admin недоступний — legacy режим
+  if (!idToken || typeof idToken !== 'string') return null;
+  try {
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    return { uid: decoded.uid };
+  } catch(e) {
+    console.log('[auth] token verification failed:', e.code || e.message);
+    return null;
+  }
+}
+
+// Helper: розв'язує фінальний UID для handler'а.
+// - Якщо Admin SDK доступний → вимагає валідний idToken, повертає verified uid.
+// - Якщо Admin SDK недоступний → fallback на клієнтський uid (для dev).
+// Повертає string uid або null.
+async function resolveUid({ idToken, fallbackUid }) {
+  if (!admin) return fallbackUid || null; // legacy fallback
+  const verified = await verifyAuthToken(idToken);
+  return verified ? verified.uid : null;
+}
+
 const CS = [
   { ax: 0,   ay: C,   bx: C,   by: 0,   nx:  1/Math.SQRT2, ny:  1/Math.SQRT2 },
   { ax: W-C, ay: 0,   bx: W,   by: C,   nx: -1/Math.SQRT2, ny:  1/Math.SQRT2 },
@@ -1153,8 +1184,16 @@ io.on('connection', (socket) => {
   registerShopHandlers(socket);
 
   // Аутентифікація для shop без mm:join (з меню/магазину)
-  socket.on('shop:auth', ({ uid }) => {
-    if (uid) socket.uid = uid;
+  // SECURITY: верифікуємо idToken і використовуємо тільки verified UID.
+  // Якщо Admin SDK недоступний — fallback на клієнтський uid (dev режим).
+  socket.on('shop:auth', async ({ uid, idToken }) => {
+    const resolvedUid = await resolveUid({ idToken, fallbackUid: uid });
+    if (resolvedUid) {
+      socket.uid = resolvedUid;
+    } else {
+      socket.uid = undefined;
+      socket.emit('shop:error', { msg: 'auth_required' });
+    }
   });
 
   // ── Обмін золото → срібло ──
@@ -1222,15 +1261,24 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('mm:join', async ({ nick, rating, uid, wins, games, paddleStats, trainingMode, avatarId }) => {
-    if(uid) socket.uid = uid; // зберігаємо для shop handlers
-    if(uid && !trainingMode) trackPlayerSeen(uid);
+  socket.on('mm:join', async ({ nick, rating, uid, idToken, wins, games, paddleStats, trainingMode, avatarId }) => {
+    // ── SECURITY: верифікуємо idToken, витягуємо реальний uid ──
+    const verifiedUid = await resolveUid({ idToken, fallbackUid: uid });
+    if (admin && !verifiedUid && !trainingMode) {
+      // В проді Admin SDK доступний — без токена не пускаємо
+      socket.emit('mm:error', 'Authentication required');
+      return;
+    }
+    // Використовуємо verified uid (або fallback в dev-режимі без Admin)
+    const realUid = verifiedUid;
+    if (realUid) socket.uid = realUid; // для shop handlers
+    if (realUid && !trainingMode) trackPlayerSeen(realUid);
 
     // ── SECURITY: ігноруємо клієнтський paddleStats і rating ──
     // Завантажуємо з Firestore (server-authoritative).
     // Якщо db відсутній — використовуємо дефолтні значення.
-    const serverStats = await loadValidatedPaddleStats(uid);
-    const serverRating = uid ? await loadValidatedRating(uid) : (rating|0) || 500;
+    const serverStats = await loadValidatedPaddleStats(realUid);
+    const serverRating = realUid ? await loadValidatedRating(realUid) : (rating|0) || 500;
     // Якщо клієнт встиг disconnect поки ми читали Firestore — нічого не робимо
     if (!socket.connected) return;
 
@@ -1238,7 +1286,7 @@ io.on('connection', (socket) => {
       const tRoom = createRoom('training_'+socket.id);
       rooms.set(tRoom.id, tRoom);
       myRoom = tRoom; mySlot = 0;
-      tRoom.players[socket.id] = { slot:0, nick, rating: serverRating, uid, wins:wins||0, games:games||0, input:{},
+      tRoom.players[socket.id] = { slot:0, nick, rating: serverRating, uid: realUid, wins:wins||0, games:games||0, input:{},
         paddleStats: serverStats, trainingMode:true };
       socket.join(tRoom.id);
       socket.emit('mm:joined',{mySlot:0,roomId:tRoom.id});
@@ -1253,7 +1301,7 @@ io.on('connection', (socket) => {
       if (botSlot !== undefined) { delete room.bots[botSlot]; mySlot = botSlot; }
       else { socket.emit('mm:error', 'Кімната повна'); return; }
     }
-    room.players[socket.id] = { slot: mySlot, nick, rating: serverRating, uid, wins: wins||0, games: games||0, avatarId: avatarId||0, input: {},
+    room.players[socket.id] = { slot: mySlot, nick, rating: serverRating, uid: realUid, wins: wins||0, games: games||0, avatarId: avatarId||0, input: {},
       paddleStats: serverStats };
     socket.join(room.id);
     socket.emit('mm:joined', { mySlot, roomId: room.id });
@@ -1274,12 +1322,29 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('rejoin', async ({ roomId, slot, nick, rating, uid, paddleStats }) => {
+  socket.on('rejoin', async ({ roomId, slot, nick, rating, uid, idToken, paddleStats }) => {
     const room = rooms.get(roomId);
     if (!room) { socket.emit('rejoin:fail', { reason: 'room_gone' }); return; }
 
+    // ── SECURITY: верифікуємо idToken ──
+    const verifiedUid = await resolveUid({ idToken, fallbackUid: uid });
+    if (admin && !verifiedUid) {
+      socket.emit('rejoin:fail', { reason: 'auth_required' });
+      return;
+    }
+    const realUid = verifiedUid;
+
     const alreadyTaken = Object.values(room.players).some(p => p.slot === slot);
     if (alreadyTaken) { socket.emit('rejoin:fail', { reason: 'slot_taken' }); return; }
+
+    // ── Додатковий захист: слот, який ми відновлюємо, має належати цьому UID ──
+    // (щоб не можна було підхопити чужий відключений слот)
+    const savedData = room._disconnected && room._disconnected[slot];
+    if (savedData && savedData.uid && realUid && savedData.uid !== realUid) {
+      console.log('[rejoin] UID mismatch: slot='+slot+' wants='+realUid+' saved='+savedData.uid);
+      socket.emit('rejoin:fail', { reason: 'wrong_uid' });
+      return;
+    }
 
     // ── Відміняємо таймер кіку для цього слоту ──
     if (room._slotDeleteTimers && room._slotDeleteTimers[slot]) {
@@ -1288,25 +1353,23 @@ io.on('connection', (socket) => {
     }
 
     // ── SECURITY: перезавантажуємо paddleStats з БД, не довіряємо клієнту ──
-    // Якщо гравець був у _disconnected — беремо ті stats (вже серверно валідовані
-    // на mm:join), бо вони свіжі і не змінились за 30с. Інакше — читаємо з Firestore.
-    const savedData = room._disconnected && room._disconnected[slot];
     let restoredPaddleStats;
     if (savedData && savedData.paddleStats) {
       restoredPaddleStats = savedData.paddleStats;
     } else {
-      restoredPaddleStats = await loadValidatedPaddleStats(uid);
+      restoredPaddleStats = await loadValidatedPaddleStats(realUid);
       if (!socket.connected) return;
     }
     // Rating також валідуємо з БД
-    const serverRating = uid ? await loadValidatedRating(uid) : (rating|0) || 500;
+    const serverRating = realUid ? await loadValidatedRating(realUid) : (rating|0) || 500;
     if (!socket.connected) return;
 
     if (room._disconnected) delete room._disconnected[slot];
 
+    if (realUid) socket.uid = realUid;
     myRoom = room; mySlot = slot;
     delete room.bots[slot];
-    room.players[socket.id] = { slot, nick, rating: serverRating, uid, input: {}, paddleStats: restoredPaddleStats };
+    room.players[socket.id] = { slot, nick, rating: serverRating, uid: realUid, input: {}, paddleStats: restoredPaddleStats };
     socket.join(room.id);
 
     // ── Сповіщаємо інших що гравець повернувся ──
