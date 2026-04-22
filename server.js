@@ -617,102 +617,102 @@ function applyFFBall(gs, s, ball) {
   if (ball[_cdKey] && ball[_cdKey] > 0) { ball[_cdKey]--; return false; }
 
   const p = slotToPaddle(s, gs.paddles[s], gs, null);
+  const view = SLOT_VIEW[s];
   const fcx = p.x + p.w/2, fcy = p.y + p.h/2;
+  const maxR = f.maxR || FR;
+  const collideR = maxR + BR;
+
+  // ── Face normal: ФІКСОВАНИЙ напрямок від паддла назовні ──
+  // bottom (paddle знизу, ворота внизу) → поле штовхає вгору  → (0,-1)
+  // top    (paddle зверху)              → поле штовхає вниз → (0,+1)
+  // left                                → поле штовхає вправо → (+1,0)
+  // right                               → поле штовхає вліво  → (-1,0)
+  let nx = 0, ny = 0;
+  // Tangent — напрямок вздовж паддла (вісь, по якій рухається гравець)
+  let tx = 0, ty = 0;
+  if (view === 'bottom')     { nx =  0; ny = -1; tx = 1; ty = 0; }
+  else if (view === 'top')   { nx =  0; ny =  1; tx = 1; ty = 0; }
+  else if (view === 'left')  { nx =  1; ny =  0; tx = 0; ty = 1; }
+  else if (view === 'right') { nx = -1; ny =  0; tx = 0; ty = 1; }
+
+  // ── Швидкість м'яча У БІК ПАДДЛА (додатнє = летить всередину поля) ──
+  const velTowardPaddle = -(ball.vx*nx + ball.vy*ny);
+
+  // ── Distance checks (circle test) ──
   const dx = ball.x - fcx, dy = ball.y - fcy;
   const dist = Math.hypot(dx, dy);
-  const maxR = f.maxR || FR;
+  const oldX = ball.x - ball.vx, oldY = ball.y - ball.vy;
+  const odx = oldX - fcx, ody = oldY - fcy;
+  const oldDist = Math.hypot(odx, ody);
 
-  // ── Зона виявлення: тільки +BR буфер, без швидкості ──
-  // Це фіксує баг "занадто рання реакція на швидкі м'ячі"
-  const collideR = maxR + BR;
-  if (dist > collideR + 4) return false;
+  // ── Нічого робити якщо м'яч не в зоні ──
+  if (dist > collideR && oldDist > collideR) return false;
 
-  // ── Нормаль від центру поля → м'яч ──
-  // Якщо м'яч прямо в центрі — відштовхуємо від ракетки
-  let nx, ny;
-  if (dist > 0.5) {
-    nx = dx / dist;
-    ny = dy / dist;
-  } else {
-    const view = SLOT_VIEW[s];
-    nx = view==='left' ? 1 : view==='right' ? -1 : 0;
-    ny = view==='bottom' ? -1 : view==='top' ? 1 : 0;
-    if (nx===0 && ny===0) ny = -1;
-  }
+  // ── М'яч уже відлітає — НЕ ЧІПАЄМО ──
+  // Це усуває "крюк" коли поле наздоганяє відбитий м'яч.
+  if (velTowardPaddle <= 0) return false;
 
-  // ── Dot product: швидкість м'яча вздовж нормалі ──
-  const dot = ball.vx*nx + ball.vy*ny;
-
-  // ── М'яч летить назовні (dot > 0) — не чіпаємо ──
-  // Це фіксує баг "hooking" коли поле наздоганяє м'яч що вже відлетів
-  if (dot > 0) {
-    // Але якщо м'яч застряг всередині — виштовхуємо
-    if (dist < collideR - BR) {
-      ball.x = fcx + nx * (collideR + 2);
-      ball.y = fcy + ny * (collideR + 2);
-    }
-    return false;
-  }
-
-  // ── CCD: точна позиція зіткнення ──
-  // Перевіряємо попередній тік щоб знайти точний момент перетину межі
-  const oldX = ball.x - ball.vx;
-  const oldY = ball.y - ball.vy;
-  const rx = oldX - fcx, ry = oldY - fcy;
-  const a = ball.vx*ball.vx + ball.vy*ball.vy;
-  const b = 2*(rx*ball.vx + ry*ball.vy);
-  const c = rx*rx + ry*ry - collideR*collideR;
-  const disc = b*b - 4*a*c;
-
-  if (disc >= 0 && a > 0.0001) {
-    const t = (-b - Math.sqrt(disc)) / (2*a);
-    // t в діапазоні 0..1 = перетин відбувся цього тіку
-    if (t >= 0 && t <= 1.0) {
-      ball.x = oldX + ball.vx * t;
-      ball.y = oldY + ball.vy * t;
-      const hdx = ball.x - fcx, hdy = ball.y - fcy;
-      const hdist = Math.hypot(hdx, hdy);
-      if (hdist > 0.5) { nx = hdx/hdist; ny = hdy/hdist; }
+  // ── Якщо раніше не був у полі і зараз в полі — знайти точку перетину (CCD) ──
+  // Інакше м'яч вже був у полі (можливо через тільки-що активоване поле) — відбиваємо
+  // з поточної позиції.
+  let hitX = ball.x, hitY = ball.y;
+  if (oldDist > collideR && dist <= collideR) {
+    // Solve |old + t*v - center|² = collideR² for t ∈ [0,1]
+    const vx = ball.vx, vy = ball.vy;
+    const a = vx*vx + vy*vy;
+    const b = 2 * (odx*vx + ody*vy);
+    const c = odx*odx + ody*ody - collideR*collideR;
+    const disc = b*b - 4*a*c;
+    if (disc >= 0 && a > 1e-6) {
+      const tHit = (-b - Math.sqrt(disc)) / (2*a);
+      if (tHit >= 0 && tHit <= 1) {
+        hitX = oldX + vx * tHit;
+        hitY = oldY + vy * tHit;
+      }
     }
   }
 
-  // ── Відбиття: дзеркальне відображення швидкості ──
-  const dot2 = ball.vx*nx + ball.vy*ny;
-  ball.vx -= 2 * dot2 * nx;
-  ball.vy -= 2 * dot2 * ny;
+  // ── Офсет м'яча від центру паддла вздовж осі паддла (tangent) ──
+  // Це ключове для прогнозованості: де торкнулось, туди і летить.
+  // bottom: offset = ball.x - paddleCenterX
+  // left:   offset = ball.y - paddleCenterY
+  const offsetAxis = (hitX - fcx) * tx + (hitY - fcy) * ty;
 
-  // ── Нормалізуємо до цільової швидкості ──
-  const vspeed = Math.hypot(ball.vx, ball.vy);
-  const targetSpeed = Math.min(Math.max(vspeed, 2.5) * BMULT, SMAX);
-  if (vspeed > 0.01) {
-    ball.vx = (ball.vx / vspeed) * targetSpeed;
-    ball.vy = (ball.vy / vspeed) * targetSpeed;
-  }
+  // Нормалізуємо до ±1 (межа = радіус поля)
+  const maxOffset = collideR;
+  let k = offsetAxis / maxOffset;
+  if (k > 1) k = 1; else if (k < -1) k = -1;
 
-  // ── Мінімальний кут від нормалі ≥30° (0.5 = cos60°) ──
-  // Запобігає "ковзанню" вздовж межі поля
-  const MIN_NORM = 0.5;
-  const normComp = ball.vx*nx + ball.vy*ny;
-  if (normComp < MIN_NORM * targetSpeed) {
-    const boost = MIN_NORM * targetSpeed - normComp;
-    ball.vx += nx * boost;
-    ball.vy += ny * boost;
-    const s2 = Math.hypot(ball.vx, ball.vy);
-    if (s2 > 0.01) { ball.vx = ball.vx/s2*targetSpeed; ball.vy = ball.vy/s2*targetSpeed; }
-  }
+  // ── Кут відбиття: 0° в центрі, ±60° на краях ──
+  const MAX_ANGLE_RAD = Math.PI / 3;
+  const angle = k * MAX_ANGLE_RAD;
 
-  // ── Виштовхуємо м'яч назовні межі ──
-  ball.x = fcx + nx * (collideR + 4);
-  ball.y = fcy + ny * (collideR + 4);
+  // ── Фінальний напрямок: nominal normal повернута на `angle` в бік tangent ──
+  // out = n*cos(angle) + t*sin(angle)
+  const cosA = Math.cos(angle), sinA = Math.sin(angle);
+  const outX = nx * cosA + tx * sinA;
+  const outY = ny * cosA + ty * sinA;
 
-  // ── Cooldown 10 тіків (~167ms) ──
-  ball['ff_cd_' + s] = 10;
+  // ── Швидкість: нарощуємо до (сучасна speed × BMULT) з clamp до SMAX ──
+  const vSpeed = Math.hypot(ball.vx, ball.vy);
+  const targetSpeed = Math.min(Math.max(vSpeed, 2.5) * BMULT, SMAX);
+
+  ball.vx = outX * targetSpeed;
+  ball.vy = outY * targetSpeed;
+
+  // ── Ставимо м'яч на край поля в напрямку out (безпечна позиція назовні) ──
+  ball.x = fcx + outX * (collideR + 4);
+  ball.y = fcy + outY * (collideR + 4);
+
+  // ── Cooldown 10 тіків (~167ms) — щоб не було re-entry ──
+  ball[_cdKey] = 10;
 
   // ── Округлення для детермінізму клієнт/сервер ──
   ball.x  = Math.round(ball.x  * 10) / 10;
   ball.y  = Math.round(ball.y  * 10) / 10;
   ball.vx = Math.round(ball.vx * 10) / 10;
   ball.vy = Math.round(ball.vy * 10) / 10;
+
   return true;
 }
 
