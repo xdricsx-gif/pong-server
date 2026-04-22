@@ -609,38 +609,43 @@ function getFFRadius(f) {
 }
 
 // ── FORCE FIELD REFLECTION (remains server-authoritative) ──
-// Fіз. модель: V_ball' = galilean_reflect(V_ball, V_paddle, n) + V_paddle·k_drag + n·push
-//   1. Переходимо в систему паддла: V_rel = V_ball − V_paddle
-//   2. Відбиваємо по нормалі: V_rel' = V_rel − 2(V_rel·n)·n
-//   3. Повертаємось у world: V_ball' = V_rel' + V_paddle
-//   4. Buff: додаємо часткову швидкість паддла (k_drag) + постійний імпульс (push)
-//   5. Clamp до SMAX
-const FF_K_DRAG = 0.7;   // скільки швидкості паддла "прилипає" до м'яча (0=ігнор, 1=100%)
-const FF_PUSH   = 0.8;   // постійний імпульс назовні (buff активного shield'а)
-const FF_MIN_SP = 2.5;   // мінімальна швидкість м'яча після відбиття
+// Fіз. модель: V_ball' = reflect(V_ball, n) + V_paddle·k_drag + n·push
+//
+// Кожен м'яч обробляється полем МАКСИМУМ РАЗ за візит у зону поля.
+// Прапор ball['ff_vis_<s>'] знімається лише коли м'яч фізично вийшов за межу.
+// Це надійно блокує "крюк" без залежності від часу/швидкості.
+const FF_K_DRAG     = 0.7;   // скільки швидкості паддла "прилипає" до м'яча
+const FF_PUSH       = 0.8;   // звичайний push (додається після reflection)
+const FF_PUSH_GRACE = 1.6;   // посилений push для grace (м'яч всередині при активації)
+const FF_MIN_SP     = 2.5;   // мінімум швидкості після відбиття
 function applyFFBall(gs, s, ball) {
   const f = gs.fields[s];
   if (!f || !f.active) return false;
-
-  // ── Cooldown ──
-  const _cdKey = 'ff_cd_' + s;
-  if (ball[_cdKey] && ball[_cdKey] > 0) { ball[_cdKey]--; return false; }
 
   const p = slotToPaddle(s, gs.paddles[s], gs, null);
   const fcx = p.x + p.w/2, fcy = p.y + p.h/2;
   const maxR = f.maxR || FR;
   const collideR = maxR + BR;
 
-  // ── Дистанції поточний/попередній тік ──
   const dx = ball.x - fcx, dy = ball.y - fcy;
   const dist = Math.hypot(dx, dy);
   const oldX = ball.x - ball.vx, oldY = ball.y - ball.vy;
   const odx = oldX - fcx, ody = oldY - fcy;
   const oldDist = Math.hypot(odx, ody);
 
+  const _visKey = 'ff_vis_' + s;
+
+  // ── Anti-крюк: вже обробляли цей м'яч цим полем ──
+  // Ігноруємо, поки м'яч не вийде з зони (+ 2px буфер проти jitter).
+  if (ball[_visKey]) {
+    if (dist > collideR + 2) ball[_visKey] = false;
+    return false;
+  }
+
+  // ── Не в полі — нічого ──
   if (dist > collideR && oldDist > collideR) return false;
 
-  // ── CCD: точка контакту (де саме м'яч перетнув межу) ──
+  // ── CCD: точка контакту ──
   let hitX, hitY;
   if (oldDist > collideR && dist <= collideR) {
     const a = ball.vx*ball.vx + ball.vy*ball.vy;
@@ -657,16 +662,13 @@ function applyFFBall(gs, s, ball) {
   }
   if (hitX === undefined) { hitX = ball.x; hitY = ball.y; }
 
-  // ── Radial normal від центру поля до точки контакту ──
-  // Це дає "де торкнулось — туди і полетіло" поведінку, природну для круглого поля.
+  // ── Radial normal ──
   const hdx = hitX - fcx, hdy = hitY - fcy;
   const hdist = Math.hypot(hdx, hdy);
   let nx, ny;
   if (hdist > 1e-6) {
-    nx = hdx / hdist;
-    ny = hdy / hdist;
+    nx = hdx / hdist; ny = hdy / hdist;
   } else {
-    // М'яч точно в центрі — fallback на face normal паддла
     const view = SLOT_VIEW[s];
     if (view === 'bottom')     { nx = 0; ny = -1; }
     else if (view === 'top')   { nx = 0; ny =  1; }
@@ -674,8 +676,7 @@ function applyFFBall(gs, s, ball) {
     else                       { nx =-1; ny =  0; }
   }
 
-  // ── Швидкість ПАДДЛА цього тіку (pixels per tick) ──
-  // Вона тільки вздовж однієї осі, залежно від слоту.
+  // ── Швидкість паддла ──
   const prevPos = gs.paddlesPrev ? (gs.paddlesPrev[s] != null ? gs.paddlesPrev[s] : gs.paddles[s]) : gs.paddles[s];
   const paddleMove = gs.paddles[s] - prevPos;
   const view = SLOT_VIEW[s];
@@ -683,55 +684,41 @@ function applyFFBall(gs, s, ball) {
   const paddleVx = paddleAxis === 'x' ? paddleMove : 0;
   const paddleVy = paddleAxis === 'y' ? paddleMove : 0;
 
-  // ── Trigger: м'яч наближається до МЕЖІ поля в lab frame (V_ball · n < 0) ──
-  // Це об'єктивний критерій — не залежить від системи відліку паддла.
-  // Усуває "крюк" (м'яч вже летить назовні → skip).
+  // ── Обчислюємо нову швидкість ──
   const vDotN = ball.vx * nx + ball.vy * ny;
-  if (vDotN >= 0) return false;
+  let newVx, newVy;
+  if (vDotN < 0) {
+    // Класичне відбиття — м'яч летить У поле
+    const reflVx = ball.vx - 2 * vDotN * nx;
+    const reflVy = ball.vy - 2 * vDotN * ny;
+    newVx = reflVx + paddleVx * FF_K_DRAG + nx * FF_PUSH;
+    newVy = reflVy + paddleVy * FF_K_DRAG + ny * FF_PUSH;
+  } else {
+    // GRACE: м'яч паралельно або летить назовні — не інвертуємо, лише пушимо
+    // (цей кейс: активація поля над м'ячем, що вже рядом або щойно відбився від ракетки)
+    newVx = ball.vx + nx * FF_PUSH_GRACE + paddleVx * FF_K_DRAG;
+    newVy = ball.vy + ny * FF_PUSH_GRACE + paddleVy * FF_K_DRAG;
+  }
 
-  // ── ФОРМУЛА (specification):
-  //   V_ball' = reflect(V_ball, n) + V_paddle · k_drag + n · push
-  //
-  // Частини:
-  //   reflect(V_ball, n): чиста pong-рефлексія → м'яч летить у напрямок,
-  //     протилежний падінню по нормалі. Гарантує базову передбачуваність.
-  //   V_paddle · k_drag: підхоплення імпульсу паддла. Якщо паддл рухається в
-  //     напрямок нормалі (лівою стороною при русі вліво) — м'яч ще сильніше туди.
-  //     Якщо паддл рухається ВІД напрямку нормалі — м'яч втрачає цю компоненту.
-  //   n · push: постійний buff. Поле "бумкає" м'яч назовні незалежно від стану.
-  const reflVx = ball.vx - 2 * vDotN * nx;
-  const reflVy = ball.vy - 2 * vDotN * ny;
-  let newVx = reflVx + paddleVx * FF_K_DRAG + nx * FF_PUSH;
-  let newVy = reflVy + paddleVy * FF_K_DRAG + ny * FF_PUSH;
-
-  // ── Масштабування: min/max clamp ──
-  // Якщо швидкість занизька — масштабуємо пропорційно до MIN_SP
-  // (не пушимо тільки по нормалі — тангенціальна компонента може це компенсувати).
+  // ── Clamp швидкості ──
   let sp = Math.hypot(newVx, newVy);
   if (sp < FF_MIN_SP && sp > 0.01) {
-    const f = FF_MIN_SP / sp;
-    newVx *= f;
-    newVy *= f;
-    sp = FF_MIN_SP;
+    const f1 = FF_MIN_SP / sp; newVx *= f1; newVy *= f1; sp = FF_MIN_SP;
   }
   if (sp > SMAX) {
-    const f = SMAX / sp;
-    newVx *= f;
-    newVy *= f;
+    const f1 = SMAX / sp; newVx *= f1; newVy *= f1;
   }
 
   ball.vx = newVx;
   ball.vy = newVy;
 
-  // ── Позиція: м'яч залишається в точці контакту + 2px назовні ──
-  // НЕ телепортуємо на край поля, НЕ виштовхуємо на центр паддла.
+  // ── М'яч лишається в точці контакту + 2px назовні ──
   ball.x = hitX + nx * 2;
   ball.y = hitY + ny * 2;
 
-  // ── Cooldown 10 тіків (~167ms) ──
-  ball[_cdKey] = 10;
+  // ── Позначаємо: м'яч оброблений цим полем, чекаємо поки вийде з зони ──
+  ball[_visKey] = true;
 
-  // ── Округлення для детермінізму клієнт/сервер ──
   ball.x  = Math.round(ball.x  * 10) / 10;
   ball.y  = Math.round(ball.y  * 10) / 10;
   ball.vx = Math.round(ball.vx * 10) / 10;
@@ -916,7 +903,14 @@ function tick(room) {
         const fd = pStats?.fd || 1.0;
         const maxRf = gs.fields[s].maxR || pStats?.fr || FR;
         gs.fields[s].r = Math.min(maxRf, (gs.fields[s].t / 200) * maxRf);
-        if (gs.fields[s].t >= FDR * fd) { gs.fields[s].active = false; gs.fields[s].t = 0; gs.fields[s].r = 0; }
+        if (gs.fields[s].t >= FDR * fd) {
+          gs.fields[s].active = false;
+          gs.fields[s].t = 0;
+          gs.fields[s].r = 0;
+          // Очистити visited-прапори: наступна активація зможе обробити тих же м'ячів знову
+          const _vk = 'ff_vis_' + s;
+          for (const b of gs.balls) { delete b[_vk]; }
+        }
       } else {
         const pStats2 = getSlotPlayer(room, s)?.paddleStats
           || room._disconnected?.[s]?.paddleStats;
