@@ -246,6 +246,124 @@ const PADDLE_PRICES_SRV = {
 
 const ENERGY_GOLD_COST_SRV = 50;
 
+// ══════════════════════════════════════════════════════
+// PADDLE STATS — SERVER-AUTHORITATIVE (дзеркало клієнта)
+// ══════════════════════════════════════════════════════
+// ВАЖЛИВО: ДОЛЖНО бути синхронізовано з PADDLE_CATALOG у index.html (рядок ~1665)
+// Якщо міняєш базові характеристики — міняй в ОБОХ місцях!
+const PADDLE_CATALOG_SRV = [
+  { spd:3.375, w:54, fr:54, bm:2.32, er:1.0, fd:1.0 }, // 0 Новачок
+  { spd:3.375, w:62, fr:54, bm:2.32, er:1.0, fd:1.0 }, // 1 Фронтир
+  { spd:4.5,   w:50, fr:54, bm:2.32, er:1.0, fd:1.0 }, // 2 Вектор
+  { spd:3.375, w:52, fr:68, bm:2.32, er:1.0, fd:1.0 }, // 3 Орбіта
+  { spd:3.375, w:52, fr:54, bm:2.9,  er:1.0, fd:1.0 }, // 4 Імпульс
+  { spd:2.5,   w:72, fr:54, bm:2.32, er:1.2, fd:1.0 }, // 5 Авангард
+  { spd:5.5,   w:46, fr:50, bm:2.0,  er:1.3, fd:0.8 }, // 6 Спринт
+  { spd:3.8,   w:42, fr:72, bm:2.6,  er:1.0, fd:1.4 }, // 7 Сталкер
+  { spd:4.0,   w:58, fr:60, bm:2.5,  er:1.2, fd:1.2 }, // 8 Баланс
+  { spd:2.8,   w:80, fr:50, bm:2.0,  er:1.5, fd:1.0 }, // 9 Егіда
+  { spd:6.0,   w:48, fr:58, bm:2.4,  er:1.5, fd:0.7 }, // 10 Зевс
+  { spd:3.2,   w:50, fr:90, bm:2.6,  er:0.8, fd:1.6 }, // 11 Полюс
+  { spd:3.6,   w:66, fr:60, bm:2.8,  er:1.3, fd:1.3 }, // 12 Титан
+  { spd:5.0,   w:52, fr:72, bm:2.7,  er:1.4, fd:1.2 }, // 13 Темпест
+  { spd:3.8,   w:62, fr:70, bm:3.2,  er:1.2, fd:1.5 }, // 14 Кріон
+  { spd:5.2,   w:54, fr:66, bm:3.4,  er:1.5, fd:1.2 }, // 15 Рейвен
+  { spd:4.0,   w:76, fr:78, bm:3.0,  er:1.3, fd:1.6 }, // 16 Фантом
+  { spd:3.5,   w:58, fr:86, bm:3.8,  er:1.2, fd:1.8 }, // 17 Інферно
+  { spd:5.0,   w:68, fr:80, bm:3.5,  er:1.6, fd:1.6 }, // 18 Етернал
+  { spd:6.0,   w:76, fr:92, bm:4.0,  er:2.0, fd:2.0 }, // 19 Абсолют
+];
+
+const HANGAR_PARTS_SRV = ['w', 'spd', 'fr', 'bm', 'er', 'fd'];
+
+// lv1=0.9x, lv10=1.2x (те саме що клієнтський hangarMult)
+function hangarMultSrv(level) {
+  const lv = Math.max(1, Math.min(10, level|0));
+  return 0.90 + (lv - 1) * (0.30 / 9);
+}
+
+// Дефолтні stats — для нових гравців або fallback при помилках.
+const DEFAULT_PADDLE_STATS = Object.freeze({
+  spd:3.375, w:54, fr:54, bm:2.32, er:1.0, fd:1.0,
+  paddleId:0, avgUpgrade:0,
+});
+
+// Pure функція — розраховує фінальні stats без I/O.
+// hangars — { '5': {w:3, spd:7, ...}, '12': {...} }  (ключ — paddleId як string)
+function computePaddleStats(paddleId, hangars) {
+  const pid = (paddleId|0);
+  const base = PADDLE_CATALOG_SRV[pid] || PADDLE_CATALOG_SRV[0];
+  const hangarForPid = (hangars && (hangars[pid] || hangars[String(pid)])) || {};
+  const result = { paddleId: pid };
+  let sumLv = 0;
+  for (const part of HANGAR_PARTS_SRV) {
+    const lv = hangarForPid[part] || 1;
+    const mult = hangarMultSrv(lv);
+    result[part] = +(base[part] * mult).toFixed(3);
+    sumLv += lv;
+  }
+  // avgUpgrade — середній рівень апгрейдів, у % від максимуму (для відображення іконки)
+  const avgLv = sumLv / HANGAR_PARTS_SRV.length;
+  result.avgUpgrade = Math.round(((avgLv - 1) / 9) * 100);
+  return result;
+}
+
+// Async: читає актуальні дані гравця з Firestore, валідує і повертає
+// серверно-розраховані paddleStats. Блокує читерство:
+//   - paddleId, який гравець не придбав → fallback до 0
+//   - вигадані рівні апгрейдів → обрізаємо до 1..10
+// Якщо Firestore недоступний (db=null) або uid відсутній — дефолтна ракетка.
+async function loadValidatedPaddleStats(uid) {
+  if (!db || !uid) return { ...DEFAULT_PADDLE_STATS };
+  try {
+    const [pubSnap, privSnap] = await Promise.all([
+      db.collection('users_public').doc(uid).get(),
+      db.collection('users_private').doc(uid).get(),
+    ]);
+    const pub = pubSnap.exists ? pubSnap.data() : {};
+    const priv = privSnap.exists ? privSnap.data() : {};
+
+    let paddleId = pub.paddleId|0;
+    const ownedPaddles = Array.isArray(priv.ownedPaddles) ? priv.ownedPaddles : [0];
+
+    // Валідація: чи володіє паддлом? Якщо ні → fallback до першої доступної.
+    if (!ownedPaddles.includes(paddleId)) {
+      console.log('[paddleStats] uid='+uid+' namesake="'+pub.nickname+'" tried paddleId='+paddleId+' but ownedPaddles='+JSON.stringify(ownedPaddles)+' → fallback to 0');
+      paddleId = ownedPaddles.includes(0) ? 0 : (ownedPaddles[0]|0);
+    }
+
+    // Валідація рівнів апгрейдів: clamp в [1..10]
+    const rawHangars = priv.hangars && typeof priv.hangars === 'object' ? priv.hangars : {};
+    const safeHangars = {};
+    for (const [pid, parts] of Object.entries(rawHangars)) {
+      if (!parts || typeof parts !== 'object') continue;
+      safeHangars[pid] = {};
+      for (const part of HANGAR_PARTS_SRV) {
+        const lv = parts[part]|0;
+        safeHangars[pid][part] = Math.max(1, Math.min(10, lv || 1));
+      }
+    }
+
+    return computePaddleStats(paddleId, safeHangars);
+  } catch(e) {
+    console.error('[paddleStats] load error for uid='+uid+':', e.message);
+    return { ...DEFAULT_PADDLE_STATS };
+  }
+}
+
+// Серверна валідація rating — читаємо з БД, не довіряємо клієнту
+async function loadValidatedRating(uid) {
+  if (!db || !uid) return 500;
+  try {
+    const snap = await db.collection('users_public').doc(uid).get();
+    if (!snap.exists) return 500;
+    const r = snap.data().rating;
+    return (typeof r === 'number' && r >= 0) ? r : 500;
+  } catch(e) {
+    return 500;
+  }
+}
+
 const CS = [
   { ax: 0,   ay: C,   bx: C,   by: 0,   nx:  1/Math.SQRT2, ny:  1/Math.SQRT2 },
   { ax: W-C, ay: 0,   bx: W,   by: C,   nx: -1/Math.SQRT2, ny:  1/Math.SQRT2 },
@@ -1021,11 +1139,8 @@ io.on('connection', (socket) => {
   let myRoom = null, mySlot = null;
 
   socket.on('paddle:stats',({slot,paddleStats})=>{
-    if(myRoom){
-      for(const [sid,p] of Object.entries(myRoom.players)){
-        if(p.slot===slot){ p.paddleStats=paddleStats; break; }
-      }
-    }
+    // ── SECURITY: ігноруємо. Сервер рахує paddleStats сам з БД при mm:join.
+    // Цей handler залишено для сумісності зі старими клієнтами, але він nop.
   });
 
   // Реєструємо shop handlers для цього сокета
@@ -1101,15 +1216,24 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('mm:join', ({ nick, rating, uid, wins, games, paddleStats, trainingMode, avatarId }) => {
+  socket.on('mm:join', async ({ nick, rating, uid, wins, games, paddleStats, trainingMode, avatarId }) => {
     if(uid) socket.uid = uid; // зберігаємо для shop handlers
     if(uid && !trainingMode) trackPlayerSeen(uid);
+
+    // ── SECURITY: ігноруємо клієнтський paddleStats і rating ──
+    // Завантажуємо з Firestore (server-authoritative).
+    // Якщо db відсутній — використовуємо дефолтні значення.
+    const serverStats = await loadValidatedPaddleStats(uid);
+    const serverRating = uid ? await loadValidatedRating(uid) : (rating|0) || 500;
+    // Якщо клієнт встиг disconnect поки ми читали Firestore — нічого не робимо
+    if (!socket.connected) return;
+
     if(trainingMode){
       const tRoom = createRoom('training_'+socket.id);
       rooms.set(tRoom.id, tRoom);
       myRoom = tRoom; mySlot = 0;
-      tRoom.players[socket.id] = { slot:0, nick, rating, uid, wins:wins||0, games:games||0, input:{},
-        paddleStats: paddleStats||{spd:3.375,w:54,fr:54,bm:2.32}, trainingMode:true };
+      tRoom.players[socket.id] = { slot:0, nick, rating: serverRating, uid, wins:wins||0, games:games||0, input:{},
+        paddleStats: serverStats, trainingMode:true };
       socket.join(tRoom.id);
       socket.emit('mm:joined',{mySlot:0,roomId:tRoom.id});
       socket.emit('myslot',{mySlot:0,roomId:tRoom.id});
@@ -1123,8 +1247,8 @@ io.on('connection', (socket) => {
       if (botSlot !== undefined) { delete room.bots[botSlot]; mySlot = botSlot; }
       else { socket.emit('mm:error', 'Кімната повна'); return; }
     }
-    room.players[socket.id] = { slot: mySlot, nick, rating, uid, wins: wins||0, games: games||0, avatarId: avatarId||0, input: {},
-      paddleStats: paddleStats || { spd:3.375, w:54, fr:54, bm:2.32, er:1.0, fd:1.0 } };
+    room.players[socket.id] = { slot: mySlot, nick, rating: serverRating, uid, wins: wins||0, games: games||0, avatarId: avatarId||0, input: {},
+      paddleStats: serverStats };
     socket.join(room.id);
     socket.emit('mm:joined', { mySlot, roomId: room.id });
     broadcastLobby(room);
@@ -1144,7 +1268,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('rejoin', ({ roomId, slot, nick, rating, uid, paddleStats }) => {
+  socket.on('rejoin', async ({ roomId, slot, nick, rating, uid, paddleStats }) => {
     const room = rooms.get(roomId);
     if (!room) { socket.emit('rejoin:fail', { reason: 'room_gone' }); return; }
 
@@ -1157,15 +1281,26 @@ io.on('connection', (socket) => {
       delete room._slotDeleteTimers[slot];
     }
 
-    // ── Відновлюємо paddleStats: з rejoin запиту або зі збереженого _disconnected ──
+    // ── SECURITY: перезавантажуємо paddleStats з БД, не довіряємо клієнту ──
+    // Якщо гравець був у _disconnected — беремо ті stats (вже серверно валідовані
+    // на mm:join), бо вони свіжі і не змінились за 30с. Інакше — читаємо з Firestore.
     const savedData = room._disconnected && room._disconnected[slot];
-    const restoredPaddleStats = paddleStats || savedData?.paddleStats || { spd:3.375, w:54, fr:54, bm:2.32, er:1.0, fd:1.0 };
+    let restoredPaddleStats;
+    if (savedData && savedData.paddleStats) {
+      restoredPaddleStats = savedData.paddleStats;
+    } else {
+      restoredPaddleStats = await loadValidatedPaddleStats(uid);
+      if (!socket.connected) return;
+    }
+    // Rating також валідуємо з БД
+    const serverRating = uid ? await loadValidatedRating(uid) : (rating|0) || 500;
+    if (!socket.connected) return;
 
     if (room._disconnected) delete room._disconnected[slot];
 
     myRoom = room; mySlot = slot;
     delete room.bots[slot];
-    room.players[socket.id] = { slot, nick, rating, uid, input: {}, paddleStats: restoredPaddleStats };
+    room.players[socket.id] = { slot, nick, rating: serverRating, uid, input: {}, paddleStats: restoredPaddleStats };
     socket.join(room.id);
 
     // ── Сповіщаємо інших що гравець повернувся ──
