@@ -507,7 +507,7 @@ function slotToPaddle(slot, cx, gs, room) {
   const view = SLOT_VIEW[slot];
   let pw = PL, pvh = PLV;
   if (room) {
-    const player = Object.values(room.players).find(p => p.slot === slot);
+    const player = getSlotPlayer(room, slot);
     if (player && player.paddleStats && player.paddleStats.w) {
       if (view === 'bottom' || view === 'top') pw = player.paddleStats.w;
       else pvh = player.paddleStats.w;
@@ -694,7 +694,42 @@ function spawnBallQueued(gs) {
 const rooms = new Map();
 
 function createRoom(id) {
-  return { id, players: {}, bots: {}, status: 'waiting', countdownTimer: null, tickInterval: null, game: null };
+  return {
+    id, players: {}, bots: {}, status: 'waiting',
+    countdownTimer: null, tickInterval: null, game: null,
+    // ── Кеш slot → player object (hot-path у tick()) ──
+    // Підтримуйте через setSlotPlayer/clearSlotPlayer, не мутуйте напряму.
+    _slotMap: { 0: null, 1: null, 2: null, 3: null },
+  };
+}
+
+// Встановлює player в slot + підтримує _slotMap.
+// Викликай ЗАМІСТЬ прямого room.players[sid] = player.
+function setSlotPlayer(room, sid, player) {
+  room.players[sid] = player;
+  if (!room._slotMap) room._slotMap = { 0:null, 1:null, 2:null, 3:null };
+  room._slotMap[player.slot] = player;
+}
+
+// Видаляє player зі slot + очищає кеш.
+function clearSlotPlayer(room, sid) {
+  const p = room.players[sid];
+  if (p && room._slotMap && room._slotMap[p.slot] === p) {
+    room._slotMap[p.slot] = null;
+  }
+  delete room.players[sid];
+}
+
+// Повертає player на слоті (O(1)). Якщо кеш пустий — падає на scan (safeguard).
+function getSlotPlayer(room, slot) {
+  if (room._slotMap && room._slotMap[slot] !== undefined) {
+    return room._slotMap[slot] || null;
+  }
+  // fallback — якщо кімната створена у старому коді (не має _slotMap)
+  for (const sid in room.players) {
+    if (room.players[sid].slot === slot) return room.players[sid];
+  }
+  return null;
 }
 
 function findOrCreateRoom() {
@@ -736,7 +771,7 @@ function fillBots(room, isRanked = false) {
 function buildPlayers(room) {
   const res = {};
   for (const s of SLOTS) {
-    const p = Object.values(room.players).find(p => p.slot === s);
+    const p = getSlotPlayer(room, s);
     if (p) {
       res[s] = { nick: p.nick, rating: p.rating, isBot: false, wins: p.wins||0, games: p.games||0, avatarId: p.avatarId||0 };
     } else if (room._disconnected && room._disconnected[s]) {
@@ -798,14 +833,14 @@ function tick(room) {
       if (gs.eliminated[s]) continue;
       if (gs.fields[s].active) {
         gs.fields[s].t += TICK_MS;
-        const pStats = Object.values(room.players).find(p=>p.slot===s)?.paddleStats
+        const pStats = getSlotPlayer(room, s)?.paddleStats
           || room._disconnected?.[s]?.paddleStats;
         const fd = pStats?.fd || 1.0;
         const maxRf = gs.fields[s].maxR || pStats?.fr || FR;
         gs.fields[s].r = Math.min(maxRf, (gs.fields[s].t / 200) * maxRf);
         if (gs.fields[s].t >= FDR * fd) { gs.fields[s].active = false; gs.fields[s].t = 0; gs.fields[s].r = 0; }
       } else {
-        const pStats2 = Object.values(room.players).find(p=>p.slot===s)?.paddleStats
+        const pStats2 = getSlotPlayer(room, s)?.paddleStats
           || room._disconnected?.[s]?.paddleStats;
         const er = pStats2?.er || 1.0;
         gs.energy[s] = Math.min(1, gs.energy[s] + ECR * TICK_MS * er);
@@ -1054,7 +1089,7 @@ function broadcastState(room, sendBalls=true) {
     // ── Передаємо які слоти зараз відключені ──
     dc: SLOTS.map(s => (room._disconnected && room._disconnected[s]) ? 1 : 0),
     pw: SLOTS.map(s=>{
-      const p=Object.values(room.players).find(p=>p.slot===s);
+      const p=getSlotPlayer(room, s);
       if (p && p.paddleStats && p.paddleStats.w) return Math.round(p.paddleStats.w);
       const d=room._disconnected?.[s];
       if (d && d.paddleStats && d.paddleStats.w) return Math.round(d.paddleStats.w);
@@ -1184,7 +1219,7 @@ function startGame(room) {
   room.game = createGameState(room);
   // Paddle visual data — передається один раз при старті
   const paddleVisuals = SLOTS.map(s => {
-    const p = Object.values(room.players).find(p => p.slot === s);
+    const p = getSlotPlayer(room, s);
     const stats = p?.paddleStats || room._disconnected?.[s]?.paddleStats || {};
     const isBot = !p && !room._disconnected?.[s] && room.bots?.[s];
     if (isBot) {
@@ -1402,8 +1437,8 @@ io.on('connection', (socket) => {
       const tRoom = createRoom('training_'+socket.id);
       rooms.set(tRoom.id, tRoom);
       myRoom = tRoom; mySlot = 0;
-      tRoom.players[socket.id] = { slot:0, nick, rating: serverRating, uid: realUid, wins:wins||0, games:games||0, input:{},
-        paddleStats: serverStats, trainingMode:true };
+      setSlotPlayer(tRoom, socket.id, { slot:0, nick, rating: serverRating, uid: realUid, wins:wins||0, games:games||0, input:{},
+        paddleStats: serverStats, trainingMode:true });
       socket.join(tRoom.id);
       socket.emit('mm:joined',{mySlot:0,roomId:tRoom.id});
       socket.emit('myslot',{mySlot:0,roomId:tRoom.id});
@@ -1417,8 +1452,8 @@ io.on('connection', (socket) => {
       if (botSlot !== undefined) { delete room.bots[botSlot]; mySlot = botSlot; }
       else { socket.emit('mm:error', 'Кімната повна'); return; }
     }
-    room.players[socket.id] = { slot: mySlot, nick, rating: serverRating, uid: realUid, wins: wins||0, games: games||0, avatarId: avatarId||0, input: {},
-      paddleStats: serverStats };
+    setSlotPlayer(room, socket.id, { slot: mySlot, nick, rating: serverRating, uid: realUid, wins: wins||0, games: games||0, avatarId: avatarId||0, input: {},
+      paddleStats: serverStats });
     socket.join(room.id);
     socket.emit('mm:joined', { mySlot, roomId: room.id });
     broadcastLobby(room);
@@ -1485,7 +1520,7 @@ io.on('connection', (socket) => {
     if (realUid) socket.uid = realUid;
     myRoom = room; mySlot = slot;
     delete room.bots[slot];
-    room.players[socket.id] = { slot, nick, rating: serverRating, uid: realUid, input: {}, paddleStats: restoredPaddleStats };
+    setSlotPlayer(room, socket.id, { slot, nick, rating: serverRating, uid: realUid, input: {}, paddleStats: restoredPaddleStats });
     socket.join(room.id);
 
     // ── Сповіщаємо інших що гравець повернувся ──
@@ -1495,7 +1530,7 @@ io.on('connection', (socket) => {
       const gs = room.game;
       // Paddle visuals для всіх слотів — щоб після reconnect відображались правильно
       const rejoinPaddleVisuals = SLOTS.map(s => {
-        const p = Object.values(room.players).find(p => p.slot === s);
+        const p = getSlotPlayer(room, s);
         const stats = p?.paddleStats || room._disconnected?.[s]?.paddleStats || {};
         const isBot = !p && !room._disconnected?.[s] && room.bots?.[s];
         if (isBot) {
@@ -1599,7 +1634,7 @@ io.on('connection', (socket) => {
     const room = myRoom;
     const slot = mySlot;
     const pinfo = room.players[socket.id];
-    delete room.players[socket.id];
+    clearSlotPlayer(room, socket.id);
     socket.leave(room.id);
     myRoom = null; mySlot = null;
 
