@@ -622,7 +622,7 @@ function getFFRadius(f) {
 const FF_K_DRAG            = 0.7;   // drag на reflection (коли паддл рухається)
 const FF_REFLECT_PUSH      = 1.0;   // одноразовий push при вході м'яча у поле (удар)
 const FF_PULSE_FORCE       = 0.28;  // базовий континуальний імпульс за тік
-const FF_PULSE_CENTER_MULT = 3.0;   // множник у центрі поля (глибинa=100% → 3× force)
+const FF_PULSE_CENTER_MULT = 4.5;   // множник у центрі поля (на 50% проникнення ≈ 2× сила)
 const FF_MIN_SP            = 2.5;
 function applyFFBall(gs, s, ball) {
   const f = gs.fields[s];
@@ -709,8 +709,11 @@ function applyFFBall(gs, s, ball) {
     // ── CONTINUOUS PULSE: м'яч у полі — щотіку отримує імпульс назовні ──
     // Глибина проникнення (0 на межі, 1 у центрі)
     const penetration = Math.max(0, Math.min(1, 1 - (dist / collideR)));
+    // Квадратична крива: швидкий приріст ближче до центру
+    // penetration=0.5 → pen²=0.25, але через (1 + pen²·(mult-1)) сила зростає різко
+    const penSq = penetration * penetration;
     // Сила: базова + підсилена в центрі
-    const forceMag = FF_PULSE_FORCE * (1 + penetration * (FF_PULSE_CENTER_MULT - 1));
+    const forceMag = FF_PULSE_FORCE * (1 + penSq * (FF_PULSE_CENTER_MULT - 1));
     ball.vx += nx * forceMag;
     ball.vy += ny * forceMag;
   }
