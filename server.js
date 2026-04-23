@@ -608,16 +608,22 @@ function getFFRadius(f) {
   return Math.min(maxR, (f.t / 200) * maxR);
 }
 
-// ── FORCE FIELD REFLECTION (remains server-authoritative) ──
-// Fіз. модель: V_ball' = reflect(V_ball, n) + V_paddle·k_drag + n·push
+// ── FORCE FIELD REPULSOR (continuous field) ──
+// 
+// Поведінка: поле працює як гравітаційний репульсор. Щотіку м'яч, що знаходиться
+// в радіусі, отримує імпульс по нормалі (від центра поля назовні). Чим ГЛИБШЕ
+// м'яч у полі — тим СИЛЬНІШИЙ push. Додатково, при першому входженні в поле
+// м'яч отримує класичне reflection — "удар".
 //
-// Кожен м'яч обробляється полем МАКСИМУМ РАЗ за візит у зону поля.
-// Прапор ball['ff_vis_<s>'] знімається лише коли м'яч фізично вийшов за межу.
-// Це надійно блокує "крюк" без залежності від часу/швидкості.
-const FF_K_DRAG     = 0.7;   // скільки швидкості паддла "прилипає" до м'яча
-const FF_PUSH       = 0.8;   // звичайний push (додається після reflection)
-const FF_PUSH_GRACE = 1.6;   // посилений push для grace (м'яч всередині при активації)
-const FF_MIN_SP     = 2.5;   // мінімум швидкості після відбиття
+// Це гарантує:
+// - М'яч ЗАВЖДИ відлітає (не може застрягнути чи пролетіти наскрізь)
+// - Більш прокачане поле (великий FR) = довший час впливу = сильніший відскок
+// - Немає "крюка" — continuous push тільки виштовхує
+const FF_K_DRAG            = 0.7;   // drag на reflection (коли паддл рухається)
+const FF_REFLECT_PUSH      = 1.0;   // одноразовий push при вході м'яча у поле (удар)
+const FF_PULSE_FORCE       = 0.28;  // базовий континуальний імпульс за тік
+const FF_PULSE_CENTER_MULT = 3.0;   // множник у центрі поля (глибинa=100% → 3× force)
+const FF_MIN_SP            = 2.5;
 function applyFFBall(gs, s, ball) {
   const f = gs.fields[s];
   if (!f || !f.active) return false;
@@ -633,41 +639,13 @@ function applyFFBall(gs, s, ball) {
   const odx = oldX - fcx, ody = oldY - fcy;
   const oldDist = Math.hypot(odx, ody);
 
-  const _visKey = 'ff_vis_' + s;
-
-  // ── Anti-крюк: вже обробляли цей м'яч цим полем ──
-  // Ігноруємо, поки м'яч не вийде з зони (+ 2px буфер проти jitter).
-  if (ball[_visKey]) {
-    if (dist > collideR + 2) ball[_visKey] = false;
-    return false;
-  }
-
-  // ── Не в полі — нічого ──
+  // ── М'яч поза полем — нічого ──
   if (dist > collideR && oldDist > collideR) return false;
 
-  // ── CCD: точка контакту ──
-  let hitX, hitY;
-  if (oldDist > collideR && dist <= collideR) {
-    const a = ball.vx*ball.vx + ball.vy*ball.vy;
-    const b = 2 * (odx*ball.vx + ody*ball.vy);
-    const c = odx*odx + ody*ody - collideR*collideR;
-    const disc = b*b - 4*a*c;
-    if (disc >= 0 && a > 1e-6) {
-      const tHit = (-b - Math.sqrt(disc)) / (2*a);
-      if (tHit >= 0 && tHit <= 1) {
-        hitX = oldX + ball.vx * tHit;
-        hitY = oldY + ball.vy * tHit;
-      }
-    }
-  }
-  if (hitX === undefined) { hitX = ball.x; hitY = ball.y; }
-
-  // ── Radial normal ──
-  const hdx = hitX - fcx, hdy = hitY - fcy;
-  const hdist = Math.hypot(hdx, hdy);
+  // ── Визначаємо нормаль ──
   let nx, ny;
-  if (hdist > 1e-6) {
-    nx = hdx / hdist; ny = hdy / hdist;
+  if (dist > 1e-6) {
+    nx = dx / dist; ny = dy / dist;
   } else {
     const view = SLOT_VIEW[s];
     if (view === 'bottom')     { nx = 0; ny = -1; }
@@ -684,40 +662,73 @@ function applyFFBall(gs, s, ball) {
   const paddleVx = paddleAxis === 'x' ? paddleMove : 0;
   const paddleVy = paddleAxis === 'y' ? paddleMove : 0;
 
-  // ── Обчислюємо нову швидкість ──
-  const vDotN = ball.vx * nx + ball.vy * ny;
-  let newVx, newVy;
-  if (vDotN < 0) {
-    // Класичне відбиття — м'яч летить У поле
-    const reflVx = ball.vx - 2 * vDotN * nx;
-    const reflVy = ball.vy - 2 * vDotN * ny;
-    newVx = reflVx + paddleVx * FF_K_DRAG + nx * FF_PUSH;
-    newVy = reflVy + paddleVy * FF_K_DRAG + ny * FF_PUSH;
+  const _hitKey = 'ff_hit_' + s;
+
+  // ── Detect FIRST ENTRY: попередній тік поза полем, цей тік всередині ──
+  // Тут застосовуємо класичне reflection — відчуття "удару" об поле.
+  const justEntered = oldDist > collideR && dist <= collideR && !ball[_hitKey];
+
+  if (justEntered) {
+    // CCD — точка перетину межі
+    let hitX = ball.x, hitY = ball.y;
+    const a = ball.vx*ball.vx + ball.vy*ball.vy;
+    const b = 2 * (odx*ball.vx + ody*ball.vy);
+    const c = odx*odx + ody*ody - collideR*collideR;
+    const disc = b*b - 4*a*c;
+    if (disc >= 0 && a > 1e-6) {
+      const tHit = (-b - Math.sqrt(disc)) / (2*a);
+      if (tHit >= 0 && tHit <= 1) {
+        hitX = oldX + ball.vx * tHit;
+        hitY = oldY + ball.vy * tHit;
+      }
+    }
+    // Нормаль у точці контакту (уточнена)
+    const hhdx = hitX - fcx, hhdy = hitY - fcy;
+    const hhD = Math.hypot(hhdx, hhdy);
+    if (hhD > 1e-6) { nx = hhdx / hhD; ny = hhdy / hhD; }
+
+    const vDotN = ball.vx * nx + ball.vy * ny;
+    if (vDotN < 0) {
+      // Reflection (м'яч летить у поле)
+      const reflVx = ball.vx - 2 * vDotN * nx;
+      const reflVy = ball.vy - 2 * vDotN * ny;
+      ball.vx = reflVx + paddleVx * FF_K_DRAG + nx * FF_REFLECT_PUSH;
+      ball.vy = reflVy + paddleVy * FF_K_DRAG + ny * FF_REFLECT_PUSH;
+    } else {
+      // М'яч зайшов у поле, але летить паралельно/назовні (рідко, наприклад поле розширилось)
+      // Даємо потужний push назовні
+      ball.vx += nx * FF_REFLECT_PUSH * 1.5 + paddleVx * FF_K_DRAG;
+      ball.vy += ny * FF_REFLECT_PUSH * 1.5 + paddleVy * FF_K_DRAG;
+    }
+
+    // Позиціонуємо на межі поля
+    ball.x = hitX + nx * 2;
+    ball.y = hitY + ny * 2;
+    ball[_hitKey] = true;
   } else {
-    // GRACE: м'яч паралельно або летить назовні — не інвертуємо, лише пушимо
-    // (цей кейс: активація поля над м'ячем, що вже рядом або щойно відбився від ракетки)
-    newVx = ball.vx + nx * FF_PUSH_GRACE + paddleVx * FF_K_DRAG;
-    newVy = ball.vy + ny * FF_PUSH_GRACE + paddleVy * FF_K_DRAG;
+    // ── CONTINUOUS PULSE: м'яч у полі — щотіку отримує імпульс назовні ──
+    // Глибина проникнення (0 на межі, 1 у центрі)
+    const penetration = Math.max(0, Math.min(1, 1 - (dist / collideR)));
+    // Сила: базова + підсилена в центрі
+    const forceMag = FF_PULSE_FORCE * (1 + penetration * (FF_PULSE_CENTER_MULT - 1));
+    ball.vx += nx * forceMag;
+    ball.vy += ny * forceMag;
+  }
+
+  // ── Коли м'яч вийшов — скидаємо прапор "вже був ударений" ──
+  // (щоб наступний вхід знову дав reflection, якщо поле ще активне)
+  if (dist > collideR + 2) {
+    ball[_hitKey] = false;
   }
 
   // ── Clamp швидкості ──
-  let sp = Math.hypot(newVx, newVy);
+  let sp = Math.hypot(ball.vx, ball.vy);
   if (sp < FF_MIN_SP && sp > 0.01) {
-    const f1 = FF_MIN_SP / sp; newVx *= f1; newVy *= f1; sp = FF_MIN_SP;
+    const k = FF_MIN_SP / sp; ball.vx *= k; ball.vy *= k; sp = FF_MIN_SP;
   }
   if (sp > SMAX) {
-    const f1 = SMAX / sp; newVx *= f1; newVy *= f1;
+    const k = SMAX / sp; ball.vx *= k; ball.vy *= k;
   }
-
-  ball.vx = newVx;
-  ball.vy = newVy;
-
-  // ── М'яч лишається в точці контакту + 2px назовні ──
-  ball.x = hitX + nx * 2;
-  ball.y = hitY + ny * 2;
-
-  // ── Позначаємо: м'яч оброблений цим полем, чекаємо поки вийде з зони ──
-  ball[_visKey] = true;
 
   ball.x  = Math.round(ball.x  * 10) / 10;
   ball.y  = Math.round(ball.y  * 10) / 10;
@@ -907,9 +918,9 @@ function tick(room) {
           gs.fields[s].active = false;
           gs.fields[s].t = 0;
           gs.fields[s].r = 0;
-          // Очистити visited-прапори: наступна активація зможе обробити тих же м'ячів знову
-          const _vk = 'ff_vis_' + s;
-          for (const b of gs.balls) { delete b[_vk]; }
+          // Очистити hit-прапори: наступна активація зможе дати reflection при вході
+          const _hk = 'ff_hit_' + s;
+          for (const b of gs.balls) { delete b[_hk]; }
         }
       } else {
         const pStats2 = getSlotPlayer(room, s)?.paddleStats
@@ -1068,10 +1079,10 @@ function tick(room) {
     ball.y=Math.round(ball.y*1000)/1000;
     ball.vx=Math.round(ball.vx*1000)/1000;
     ball.vy=Math.round(ball.vy*1000)/1000;
-      let _ffHit=false;
+      // Continuous force field: викликаємо для ВСІХ полів, а не зупиняємось на першому
       for (const s of SLOTS) {
         if (gs.eliminated[s]) continue;
-        if (!_ffHit && applyFFBall(gs, s, ball)) _ffHit=true;
+        applyFFBall(gs, s, ball);
       }
       resolveChamfersBall(ball);
       clampBallObj(ball);
