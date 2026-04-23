@@ -779,7 +779,7 @@ function isBallInMagnet(gs, s, ball) {
 // При release використовуємо збережений offset для визначення кута вильоту.
 const MAG_CAPTURE_RADIUS = 55;  // м'яч захоплюється коли в цьому радіусі
 const MAG_ENTRY_DAMPING  = 0.6; // як швидко м'яч "осаджується" у offset після захоплення
-function applyMagnetBall(gs, s, ball) {
+function applyMagnetBall(gs, s, ball, playerInput) {
   if (!gs.magnet[s]) return false;
 
   const p = slotToPaddle(s, gs.paddles[s], gs, null);
@@ -808,7 +808,11 @@ function applyMagnetBall(gs, s, ball) {
 
   // Перевірка півкола (тільки перед ракеткою)
   const frontDot = dx * nx + dy * ny;
-  if (frontDot < 0) return false;
+  if (frontDot < 0) {
+    // М'яч позаду — НЕ чіпаємо його швидкість взагалі.
+    // Інакше "краєм зачепився — швидкість збилась" баг.
+    return false;
+  }
 
   const offKey_X = 'mag_offX_' + s;
   const offKey_Y = 'mag_offY_' + s;
@@ -816,40 +820,56 @@ function applyMagnetBall(gs, s, ball) {
 
   if (!ball[heldKey]) {
     // ── НЕ ЗАХОПЛЕНИЙ: тягнемо м'яч досередини і захоплюємо коли близько ──
-    // Ціль притягання (40% радіусу вперед від ракетки)
     const tgtX = fcx + nx * MAG_R * 0.40;
     const tgtY = fcy + ny * MAG_R * 0.40;
     const toX = tgtX - ball.x, toY = tgtY - ball.y;
     const toD = Math.hypot(toX, toY);
 
     if (toD < MAG_CAPTURE_RADIUS) {
-      // Захоплюємо — зберігаємо offset відносно центру ракетки
+      // Захоплюємо
       ball[heldKey] = true;
       ball[offKey_X] = ball.x - fcx;
       ball[offKey_Y] = ball.y - fcy;
       ball.vx = 0;
       ball.vy = 0;
     } else {
-      // Тягнемо (сильна pull-сила, без damping — щоб м'яч стрімко летів до цілі)
+      // Тягнемо — тільки додаємо імпульс, БЕЗ damping.
+      // Damping збивав швидкість коли м'яч летів повз край поля.
       if (toD > 0.1) {
         const tnx = toX / toD, tny = toY / toD;
-        const pull = MAG_PULL_FORCE * 2.0; // сильніше ніж раніше
+        const pull = MAG_PULL_FORCE * 2.0;
         ball.vx += tnx * pull;
         ball.vy += tny * pull;
       }
-      ball.vx *= 0.85; // м'яке demping для контролю
-      ball.vy *= 0.85;
     }
     return true;
   }
 
   // ── ЗАХОПЛЕНИЙ: жорстка прив'язка до ракетки ──
-  // М'яч завжди на позиції paddleCenter + offset
-  const offX = ball[offKey_X] || 0;
-  const offY = ball[offKey_Y] || 0;
-  const newX = fcx + offX;
-  const newY = fcy + offY;
-  // Обчислюємо швидкість (для інших фізичних систем, щоб знали що м'яч рухається)
+  // Якщо клієнт надіслав свою позицію для цього м'яча — довіряємо їй (anti-jitter)
+  let newX, newY;
+  const clientMagBall = playerInput && playerInput.magBalls ? playerInput.magBalls[ball.id] : null;
+  if (clientMagBall && typeof clientMagBall.x === 'number' && typeof clientMagBall.y === 'number') {
+    // Перевірка розумності: клієнт стверджує, що м'яч на певній позиції.
+    // Дозволяємо якщо ця позиція в межах MAG_R від ракетки.
+    const cdx = clientMagBall.x - fcx, cdy = clientMagBall.y - fcy;
+    const cdist = Math.hypot(cdx, cdy);
+    if (cdist < MAG_R + BR) {
+      newX = clientMagBall.x;
+      newY = clientMagBall.y;
+      // Оновлюємо offset на основі клієнтської позиції (щоб release був правильним)
+      ball[offKey_X] = cdx;
+      ball[offKey_Y] = cdy;
+    }
+  }
+  if (newX === undefined) {
+    // Fallback — використовуємо збережений offset
+    const offX = ball[offKey_X] || 0;
+    const offY = ball[offKey_Y] || 0;
+    newX = fcx + offX;
+    newY = fcy + offY;
+  }
+  // Обчислюємо швидкість (для інших фізичних систем)
   ball.vx = newX - ball.x;
   ball.vy = newY - ball.y;
   ball.x = newX;
@@ -1281,7 +1301,10 @@ function tick(room) {
       // Magnetic field: притягання/утримання м'ячів
       for (const s of SLOTS) {
         if (gs.eliminated[s]) continue;
-        applyMagnetBall(gs, s, ball);
+        // Знаходимо player.input для цього slot (для магнітної синхронізації)
+        const sPlayer = getSlotPlayer(room, s);
+        const sInput = sPlayer ? sPlayer.input : null;
+        applyMagnetBall(gs, s, ball, sInput);
       }
       resolveChamfersBall(ball);
       clampBallObj(ball);
@@ -1903,7 +1926,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('input', ({ left, right, boost, magnet, hist, pos, boostPos, fieldPos }) => {
+  socket.on('input', ({ left, right, boost, magnet, magBalls, hist, pos, boostPos, fieldPos }) => {
     if (!myRoom || !myRoom.players[socket.id]) return;
     const player = myRoom.players[socket.id];
     const gs = myRoom.game;
@@ -1913,7 +1936,7 @@ io.on('connection', (socket) => {
     const finalBoost = boost || anyBoost;
     // Якщо поточний pos відсутній але є в hist — беремо останній
     const effectivePos = pos !== undefined ? pos : (hist && hist.length > 0 ? hist[hist.length-1].pos : undefined);
-    player.input = { left, right, boost: finalBoost, magnet: !!magnet, fieldPos };
+    player.input = { left, right, boost: finalBoost, magnet: !!magnet, magBalls: magBalls || null, fieldPos };
     // Зберігаємо позицію при активації поля
     if (finalBoost && !player.input._boostSaved) {
       player.input.boostPos = boostPos;
