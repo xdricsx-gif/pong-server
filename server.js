@@ -773,60 +773,102 @@ function isBallInMagnet(gs, s, ball) {
   return { p, fcx, fcy, dist, dx, dy, faceNx, faceNy };
 }
 
-// Застосувати магнітне поле до одного м'яча (притягання/утримання)
+// ── Магніт — offset-based holding ──
+// Концепція: при першому захопленні зберігаємо offset м'яча відносно центру ракетки.
+// Далі м'яч ЖОРСТКО прив'язаний до паддла — рухається разом з ним без фізики.
+// При release використовуємо збережений offset для визначення кута вильоту.
+const MAG_CAPTURE_RADIUS = 55;  // м'яч захоплюється коли в цьому радіусі
+const MAG_ENTRY_DAMPING  = 0.6; // як швидко м'яч "осаджується" у offset після захоплення
 function applyMagnetBall(gs, s, ball) {
   if (!gs.magnet[s]) return false;
-  const info = isBallInMagnet(gs, s, ball);
-  if (!info) return false;
-  const { fcx, fcy, dist, faceNx, faceNy } = info;
-  // Ціль притягання — трохи перед ракеткою (на 40% радіусу по нормалі)
-  const targetDist = MAG_R * 0.40;
-  const targetX = fcx + faceNx * targetDist;
-  const targetY = fcy + faceNy * targetDist;
-  const toX = targetX - ball.x;
-  const toY = targetY - ball.y;
-  const toDist = Math.hypot(toX, toY);
 
-  // ── Режим: LOCKED (м'яч близько до цілі) vs PULLING (ще тягне) ──
-  const LOCK_DIST = 12; // якщо ближче ніж 12px — вважаємо схопленим
-  if (toDist < LOCK_DIST) {
-    // ── LOCKED: ракетка тягне м'яч за собою ──
-    // Обчислюємо швидкість ракетки з paddlesPrev
-    const prevPos = gs.paddlesPrev ? (gs.paddlesPrev[s] != null ? gs.paddlesPrev[s] : gs.paddles[s]) : gs.paddles[s];
-    const paddleMove = gs.paddles[s] - prevPos;
-    const view = SLOT_VIEW[s];
-    const axisX = (view === 'bottom' || view === 'top') ? paddleMove : 0;
-    const axisY = (view === 'left' || view === 'right') ? paddleMove : 0;
-    // М'яч рухається синхронно з ракеткою + м'який pull до target
-    ball.vx = axisX + toX * 0.3;  // 30% корекції до цілі щоб не "дрифтав"
-    ball.vy = axisY + toY * 0.3;
-    // Також притискаємо м'яч ближче до target (щоб він не втік)
-    ball.x = ball.x + axisX;
-    ball.y = ball.y + axisY;
-  } else {
-    // ── PULLING: тягнемо м'яч до цілі ──
-    if (toDist > 0.1) {
-      const tnx = toX / toDist, tny = toY / toDist;
-      // Сильніше притягання якщо м'яч ще далеко
-      const pullStrength = Math.min(1.5, toDist / (MAG_R * 0.5));
-      ball.vx += tnx * MAG_PULL_FORCE * pullStrength;
-      ball.vy += tny * MAG_PULL_FORCE * pullStrength;
+  const p = slotToPaddle(s, gs.paddles[s], gs, null);
+  const fcx = p.x + p.w/2, fcy = p.y + p.h/2;
+  const view = SLOT_VIEW[s];
+  // Face normal
+  let nx = 0, ny = 0;
+  if (view === 'bottom')     { nx = 0; ny = -1; }
+  else if (view === 'top')   { nx = 0; ny =  1; }
+  else if (view === 'left')  { nx = 1; ny =  0; }
+  else                       { nx =-1; ny =  0; }
+
+  const dx = ball.x - fcx, dy = ball.y - fcy;
+  const dist = Math.hypot(dx, dy);
+
+  // Поза зоною дії?
+  if (dist > MAG_R + BR) {
+    // Якщо м'яч уже був захоплений і випав з зони — скидаємо
+    if (ball['mag_held_' + s]) {
+      delete ball['mag_held_' + s];
+      delete ball['mag_offX_' + s];
+      delete ball['mag_offY_' + s];
     }
-    // Демпфування — гасимо швидкість щоб м'яч не пролітав далі
-    ball.vx *= MAG_HOLD_DAMPING;
-    ball.vy *= MAG_HOLD_DAMPING;
+    return false;
   }
 
-  // Позначаємо м'яч як утримуваний (для release при деактивації)
-  ball['mag_held_' + s] = true;
+  // Перевірка півкола (тільки перед ракеткою)
+  const frontDot = dx * nx + dy * ny;
+  if (frontDot < 0) return false;
+
+  const offKey_X = 'mag_offX_' + s;
+  const offKey_Y = 'mag_offY_' + s;
+  const heldKey  = 'mag_held_' + s;
+
+  if (!ball[heldKey]) {
+    // ── НЕ ЗАХОПЛЕНИЙ: тягнемо м'яч досередини і захоплюємо коли близько ──
+    // Ціль притягання (40% радіусу вперед від ракетки)
+    const tgtX = fcx + nx * MAG_R * 0.40;
+    const tgtY = fcy + ny * MAG_R * 0.40;
+    const toX = tgtX - ball.x, toY = tgtY - ball.y;
+    const toD = Math.hypot(toX, toY);
+
+    if (toD < MAG_CAPTURE_RADIUS) {
+      // Захоплюємо — зберігаємо offset відносно центру ракетки
+      ball[heldKey] = true;
+      ball[offKey_X] = ball.x - fcx;
+      ball[offKey_Y] = ball.y - fcy;
+      ball.vx = 0;
+      ball.vy = 0;
+    } else {
+      // Тягнемо (сильна pull-сила, без damping — щоб м'яч стрімко летів до цілі)
+      if (toD > 0.1) {
+        const tnx = toX / toD, tny = toY / toD;
+        const pull = MAG_PULL_FORCE * 2.0; // сильніше ніж раніше
+        ball.vx += tnx * pull;
+        ball.vy += tny * pull;
+      }
+      ball.vx *= 0.85; // м'яке demping для контролю
+      ball.vy *= 0.85;
+    }
+    return true;
+  }
+
+  // ── ЗАХОПЛЕНИЙ: жорстка прив'язка до ракетки ──
+  // М'яч завжди на позиції paddleCenter + offset
+  const offX = ball[offKey_X] || 0;
+  const offY = ball[offKey_Y] || 0;
+  const newX = fcx + offX;
+  const newY = fcy + offY;
+  // Обчислюємо швидкість (для інших фізичних систем, щоб знали що м'яч рухається)
+  ball.vx = newX - ball.x;
+  ball.vy = newY - ball.y;
+  ball.x = newX;
+  ball.y = newY;
+
   return true;
 }
 
-// Release: м'яч вилетів з магніту. Напрямок залежить від позиції вздовж осі ракетки.
-// Якщо м'яч лівіше центру паддла → вилітає "ліворуч" (по осі tangent), і т.д.
+// Release: м'яч вилетів з магніту. Напрямок залежить від збереженого offset'а вздовж ракетки.
 function releaseMagnetBall(gs, s, ball) {
   if (!ball['mag_held_' + s]) return;
+  // Використовуємо ЗБЕРЕЖЕНИЙ offset — не поточну позицію (вона могла оновитись)
+  const offX = ball['mag_offX_' + s] || 0;
+  const offY = ball['mag_offY_' + s] || 0;
+  // Очищаємо прапори
   delete ball['mag_held_' + s];
+  delete ball['mag_offX_' + s];
+  delete ball['mag_offY_' + s];
+
   const p = slotToPaddle(s, gs.paddles[s], gs, null);
   const fcx = p.x + p.w/2, fcy = p.y + p.h/2;
   const view = SLOT_VIEW[s];
@@ -836,27 +878,23 @@ function releaseMagnetBall(gs, s, ball) {
   else if (view === 'top')   { nx = 0; ny =  1; tx = 1; ty = 0; }
   else if (view === 'left')  { nx = 1; ny =  0; tx = 0; ty = 1; }
   else                       { nx =-1; ny =  0; tx = 0; ty = 1; }
-  // Позиція м'яча вздовж тангенти (відносно центру ракетки)
-  const dx = ball.x - fcx, dy = ball.y - fcy;
-  const offset = dx * tx + dy * ty;
+  // Offset вздовж тангенти — визначає кут вильоту
+  const tangentOffset = offX * tx + offY * ty;
   const half = p.w/2 * (tx !== 0 ? 1 : 0) + p.h/2 * (ty !== 0 ? 1 : 0);
-  // Нормалізований офсет −1..1
-  let k = offset / Math.max(half, 1);
+  let k = tangentOffset / Math.max(half, 1);
   if (k > 1) k = 1; else if (k < -1) k = -1;
   // Вихідний вектор: переважно по нормалі, з кутом до 60° в бік зсуву
-  const MAX_ANGLE = Math.PI / 3; // 60°
+  const MAX_ANGLE = Math.PI / 3;
   const angle = k * MAX_ANGLE;
   const cosA = Math.cos(angle), sinA = Math.sin(angle);
   const outX = nx * cosA + tx * sinA;
   const outY = ny * cosA + ty * sinA;
-  // Швидкість — MAG_RELEASE_PUSH, clamp до SMAX
   const targetSp = Math.min(MAG_RELEASE_PUSH, SMAX);
   ball.vx = outX * targetSp;
   ball.vy = outY * targetSp;
-  // Виштовхуємо м'яч за межу магніту щоб не зачепився знову
+  // Виштовхуємо м'яч за межу магніту
   ball.x = fcx + outX * (MAG_R + BR + 2);
   ball.y = fcy + outY * (MAG_R + BR + 2);
-  // Round для детермінізму
   ball.x  = Math.round(ball.x  * 10) / 10;
   ball.y  = Math.round(ball.y  * 10) / 10;
   ball.vx = Math.round(ball.vx * 10) / 10;
