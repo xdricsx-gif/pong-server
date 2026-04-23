@@ -1963,16 +1963,12 @@ io.on('connection', (socket) => {
       const serverPos = gs.paddles[slot];
       const diff = Math.abs(clampedPos - serverPos);
 
-      // Максимальне допустиме відхилення за тік:
-      // швидкість ракетки × кількість тіків між пакетами (~3) + запас
-      const maxSpeed = pStats.spd || PS;
-      const MAX_DRIFT = maxSpeed * 6 + 20; // ~40px при нормальній грі
-
-      if (diff <= MAX_DRIFT) {
-        gs.paddles[slot] = clampedPos;
-      } else {
-        gs.paddles[slot] += (clampedPos - serverPos) * 0.3;
-        console.log(`Paddle anomaly slot${slot}: diff=${diff.toFixed(0)}px`);
+      // Server-follows-client: беремо клієнтську позицію (prediction вже валідована клампами + швидкістю).
+      // Раніше був MAX_DRIFT guard, але він створював довге drift'ування (>80мс) при rollback/magnet release.
+      // Замість guard'а — клієнт вже клампує за спідом ракетки (paddle.spd).
+      gs.paddles[slot] = clampedPos;
+      if (diff > 80) {
+        console.log(`Paddle jump slot${slot}: diff=${diff.toFixed(0)}px (accepted)`);
       }
 
       // Якщо поле активне — використовуємо fieldPos для точної синхронізації відбиття
