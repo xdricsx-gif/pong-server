@@ -799,6 +799,7 @@ function applyMagnetBall(gs, s, ball) {
   if (dist > MAG_R + BR) {
     // Якщо м'яч уже був захоплений і випав з зони — скидаємо
     if (ball['mag_held_' + s]) {
+      console.log(`[MAG-LOSE] slot=${s} ball=${String(ball.id).slice(-4)} dist=${dist.toFixed(0)} (>83) pad=${Math.round(gs.paddles[s])}`);
       delete ball['mag_held_' + s];
       delete ball['mag_offX_' + s];
       delete ball['mag_offY_' + s];
@@ -811,6 +812,10 @@ function applyMagnetBall(gs, s, ball) {
   if (frontDot < 0) {
     // М'яч позаду — НЕ чіпаємо його швидкість взагалі.
     // Інакше "краєм зачепився — швидкість збилась" баг.
+    // Якщо ВЖЕ був схоплений, але потрапив позаду — це розсинхрон, лог
+    if (ball['mag_held_' + s]) {
+      console.log(`[MAG-BEHIND] slot=${s} ball=${String(ball.id).slice(-4)} ball=(${ball.x.toFixed(0)},${ball.y.toFixed(0)}) pad=${Math.round(gs.paddles[s])} fc=(${fcx.toFixed(0)},${fcy.toFixed(0)}) frontDot=${frontDot.toFixed(1)}`);
+    }
     return false;
   }
 
@@ -832,6 +837,7 @@ function applyMagnetBall(gs, s, ball) {
       ball[offKey_Y] = ball.y - fcy;
       ball.vx = 0;
       ball.vy = 0;
+      console.log(`[MAG-CAPTURE] slot=${s} ball=${String(ball.id).slice(-4)} off=(${ball[offKey_X].toFixed(1)},${ball[offKey_Y].toFixed(1)}) pad=${Math.round(gs.paddles[s])} fc=(${fcx.toFixed(0)},${fcy.toFixed(0)})`);
     } else {
       // Тягнемо — тільки додаємо імпульс, БЕЗ damping.
       // Damping збивав швидкість коли м'яч летів повз край поля.
@@ -846,16 +852,15 @@ function applyMagnetBall(gs, s, ball) {
   }
 
   // ── ЗАХОПЛЕНИЙ: жорстка прив'язка до ракетки ──
-  // Використовуємо ЗБЕРЕЖЕНИЙ offset (встановлений при capture).
-  // НЕ приймаємо клієнтську позицію — offset стабільний на сервері,
-  // а клієнт рендерить від власної predicted ракетки (localPaddleX + offset).
-  // Ось чому ball.x/y на клієнті та сервері можуть відрізнятись на (clientPaddle - serverPaddle).
-  // Це НОРМАЛЬНО і не створює desync для гравця — кожен бачить свою консистентну картину.
   const offX = ball[offKey_X] || 0;
   const offY = ball[offKey_Y] || 0;
   const newX = fcx + offX;
   const newY = fcy + offY;
-  // Обчислюємо швидкість (для інших фізичних систем)
+  // Debug: якщо м'яч різко перестрибнув (ознака розсинхрону)
+  const moveDelta = Math.hypot(newX - ball.x, newY - ball.y);
+  if (moveDelta > 15) {
+    console.log(`[MAG-HOLD-JUMP] slot=${s} ball=${String(ball.id).slice(-4)} delta=${moveDelta.toFixed(0)} old=(${ball.x.toFixed(0)},${ball.y.toFixed(0)}) new=(${newX.toFixed(0)},${newY.toFixed(0)}) pad=${Math.round(gs.paddles[s])} tick=${gs.tick}`);
+  }
   ball.vx = newX - ball.x;
   ball.vy = newY - ball.y;
   ball.x = newX;
@@ -905,6 +910,7 @@ function releaseMagnetBall(gs, s, ball) {
   ball.y  = Math.round(ball.y  * 10) / 10;
   ball.vx = Math.round(ball.vx * 10) / 10;
   ball.vy = Math.round(ball.vy * 10) / 10;
+  console.log(`[MAG-RELEASE] slot=${s} ball=${String(ball.id).slice(-4)} pos=(${ball.x.toFixed(0)},${ball.y.toFixed(0)}) v=(${ball.vx.toFixed(1)},${ball.vy.toFixed(1)}) k=${k.toFixed(2)} angle=${(angle*180/Math.PI).toFixed(0)}deg pad=${Math.round(gs.paddles[s])}`);
 }
 
 
