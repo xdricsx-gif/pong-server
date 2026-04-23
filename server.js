@@ -741,6 +741,108 @@ function applyFFBall(gs, s, ball) {
   return true;
 }
 
+// ── MAGNETIC FIELD (blockaway magnet) ──
+// Напівкругле поле перед ракеткою, тягне і утримує м'ячі.
+// Витрата: з 1.0 до 0 за 5000мс → 0.0002 / мс
+// Відновлення: з 0 до 1.0 за 10000мс → 0.0001 / мс
+const MAG_R            = 75;    // радіус магніту (px)
+const MAG_PULL_FORCE   = 0.35;  // сила притягання до центру ракетки (per tick)
+const MAG_HOLD_DAMPING = 0.55;  // демпфування швидкості м'яча коли утримується (0..1)
+const MAG_DRAIN_PER_MS = 1/5000;    // 0.0002 — витрата енергії при утриманні
+const MAG_REGEN_PER_MS = 1/10000;   // 0.0001 — регенерація коли неактивний
+const MAG_RELEASE_PUSH = 3.5;   // швидкість вильоту при відпусканні (буде clamped до SMAX)
+const MAG_MIN_ENERGY   = 0.05;  // мінімум енергії для активації (щоб не "чіркати")
+
+// Перевірка: чи м'яч у півколі магніту перед ракеткою
+function isBallInMagnet(gs, s, ball) {
+  const p = slotToPaddle(s, gs.paddles[s], gs, null);
+  const fcx = p.x + p.w/2, fcy = p.y + p.h/2;
+  const dx = ball.x - fcx, dy = ball.y - fcy;
+  const dist = Math.hypot(dx, dy);
+  if (dist > MAG_R + BR) return null;
+  // Перевіряємо півколо — тільки "перед" ракеткою (у напрямку face normal)
+  const view = SLOT_VIEW[s];
+  let faceNy = 0, faceNx = 0;
+  if (view === 'bottom')     { faceNx = 0; faceNy = -1; }
+  else if (view === 'top')   { faceNx = 0; faceNy =  1; }
+  else if (view === 'left')  { faceNx = 1; faceNy =  0; }
+  else                       { faceNx =-1; faceNy =  0; }
+  // Dot product: якщо м'яч з "лицевого" боку паддла
+  const dot = dx * faceNx + dy * faceNy;
+  if (dot < 0) return null; // м'яч позаду ракетки — не тягнемо
+  return { p, fcx, fcy, dist, dx, dy, faceNx, faceNy };
+}
+
+// Застосувати магнітне поле до одного м'яча (притягання/утримання)
+function applyMagnetBall(gs, s, ball) {
+  if (!gs.magnet[s]) return false;
+  const info = isBallInMagnet(gs, s, ball);
+  if (!info) return false;
+  const { fcx, fcy, dist, faceNx, faceNy, p } = info;
+  // Ціль притягання — трохи перед ракеткою (на 40% радіусу по нормалі)
+  const targetDist = MAG_R * 0.40;
+  const targetX = fcx + faceNx * targetDist;
+  const targetY = fcy + faceNy * targetDist;
+  const toX = targetX - ball.x;
+  const toY = targetY - ball.y;
+  const toDist = Math.hypot(toX, toY);
+  if (toDist > 0.1) {
+    const tnx = toX / toDist, tny = toY / toDist;
+    // Сила притягання — пропорційна відстані до цілі (пружинка)
+    const pullStrength = Math.min(1, toDist / (MAG_R * 0.8));
+    ball.vx += tnx * MAG_PULL_FORCE * pullStrength;
+    ball.vy += tny * MAG_PULL_FORCE * pullStrength;
+  }
+  // Демпфування — гасимо швидкість щоб м'яч не вилетів
+  ball.vx *= MAG_HOLD_DAMPING;
+  ball.vy *= MAG_HOLD_DAMPING;
+  // Позначаємо м'яч як utримуваний (для release при деактивації)
+  ball['mag_held_' + s] = true;
+  return true;
+}
+
+// Release: м'яч вилетів з магніту. Напрямок залежить від позиції вздовж осі ракетки.
+// Якщо м'яч лівіше центру паддла → вилітає "ліворуч" (по осі tangent), і т.д.
+function releaseMagnetBall(gs, s, ball) {
+  if (!ball['mag_held_' + s]) return;
+  delete ball['mag_held_' + s];
+  const p = slotToPaddle(s, gs.paddles[s], gs, null);
+  const fcx = p.x + p.w/2, fcy = p.y + p.h/2;
+  const view = SLOT_VIEW[s];
+  // Face normal (куди «дивиться» ракетка) + tangent (вісь ракетки)
+  let nx = 0, ny = 0, tx = 0, ty = 0;
+  if (view === 'bottom')     { nx = 0; ny = -1; tx = 1; ty = 0; }
+  else if (view === 'top')   { nx = 0; ny =  1; tx = 1; ty = 0; }
+  else if (view === 'left')  { nx = 1; ny =  0; tx = 0; ty = 1; }
+  else                       { nx =-1; ny =  0; tx = 0; ty = 1; }
+  // Позиція м'яча вздовж тангенти (відносно центру ракетки)
+  const dx = ball.x - fcx, dy = ball.y - fcy;
+  const offset = dx * tx + dy * ty;
+  const half = p.w/2 * (tx !== 0 ? 1 : 0) + p.h/2 * (ty !== 0 ? 1 : 0);
+  // Нормалізований офсет −1..1
+  let k = offset / Math.max(half, 1);
+  if (k > 1) k = 1; else if (k < -1) k = -1;
+  // Вихідний вектор: переважно по нормалі, з кутом до 60° в бік зсуву
+  const MAX_ANGLE = Math.PI / 3; // 60°
+  const angle = k * MAX_ANGLE;
+  const cosA = Math.cos(angle), sinA = Math.sin(angle);
+  const outX = nx * cosA + tx * sinA;
+  const outY = ny * cosA + ty * sinA;
+  // Швидкість — MAG_RELEASE_PUSH, clamp до SMAX
+  const targetSp = Math.min(MAG_RELEASE_PUSH, SMAX);
+  ball.vx = outX * targetSp;
+  ball.vy = outY * targetSp;
+  // Виштовхуємо м'яч за межу магніту щоб не зачепився знову
+  ball.x = fcx + outX * (MAG_R + BR + 2);
+  ball.y = fcy + outY * (MAG_R + BR + 2);
+  // Round для детермінізму
+  ball.x  = Math.round(ball.x  * 10) / 10;
+  ball.y  = Math.round(ball.y  * 10) / 10;
+  ball.vx = Math.round(ball.vx * 10) / 10;
+  ball.vy = Math.round(ball.vy * 10) / 10;
+}
+
+
 function spawnBallQueued(gs) {
   const ang=(Math.random()*0.6+0.2)*Math.PI*(Math.random()<0.5?1:-1)+(Math.random()<0.5?0:Math.PI);
   const spd=2.5+Math.random()*0.5;
@@ -865,6 +967,11 @@ function createGameState(room) {
     scores: { 0: 0, 1: 0, 2: 0, 3: 0 },
     energy: { 0: 1, 1: 1, 2: 1, 3: 1 },
     fields: { 0:{active:false,t:0,r:0}, 1:{active:false,t:0,r:0}, 2:{active:false,t:0,r:0}, 3:{active:false,t:0,r:0} },
+    // ── Магнітне поле (другий skill на кнопку блискавки) ──
+    // Напівкругле поле перед ракеткою, що притягує й утримує м'ячі. Працює поки натиснуто.
+    // Окрема шкала енергії, що витрачається при утриманні.
+    magEnergy: { 0: 1, 1: 1, 2: 1, 3: 1 },          // 0..1
+    magnet:    { 0:false, 1:false, 2:false, 3:false }, // активний зараз?
     eliminated: { 0: false, 1: false, 2: false, 3: false },
     // ── Єдиний хронологічний журнал вибуття (source of truth для ranking) ──
     // Перший вибулий = 4 місце, останній вибулий = 2 місце, ще живий = 1.
@@ -989,6 +1096,31 @@ function tick(room) {
         inp.boost = false;
         inp.boostPos = undefined;
       }
+
+      // ── MAGNET HANDLING ──
+      // Магніт активний, поки інп.magnet=true І є енергія.
+      // При переході active→inactive — release всіх утримуваних м'ячів.
+      const wasMagnet = gs.magnet[s];
+      const wantMagnet = !!inp.magnet;
+      if (wantMagnet && gs.magEnergy[s] > MAG_MIN_ENERGY) {
+        gs.magnet[s] = true;
+        // Витрата енергії
+        gs.magEnergy[s] = Math.max(0, gs.magEnergy[s] - MAG_DRAIN_PER_MS * TICK_MS);
+      } else {
+        gs.magnet[s] = false;
+      }
+      // Якщо енергія закінчилась — примусово вимикаємо
+      if (gs.magEnergy[s] <= 0) {
+        gs.magnet[s] = false;
+      }
+      // Release: був активний → став неактивним
+      if (wasMagnet && !gs.magnet[s]) {
+        for (const b of gs.balls) releaseMagnetBall(gs, s, b);
+      }
+      // Регенерація — тільки коли неактивний
+      if (!gs.magnet[s]) {
+        gs.magEnergy[s] = Math.min(1, gs.magEnergy[s] + MAG_REGEN_PER_MS * TICK_MS);
+      }
     }
     // ── Відключені гравці — ракетка стоїть (input не надходить, нічого не робимо) ──
 
@@ -1087,6 +1219,11 @@ function tick(room) {
         if (gs.eliminated[s]) continue;
         applyFFBall(gs, s, ball);
       }
+      // Magnetic field: притягання/утримання м'ячів
+      for (const s of SLOTS) {
+        if (gs.eliminated[s]) continue;
+        applyMagnetBall(gs, s, ball);
+      }
       resolveChamfersBall(ball);
       clampBallObj(ball);
       let hit = false;
@@ -1181,6 +1318,9 @@ function broadcastState(room, sendBalls=true) {
     el: [gs.eliminated[0]?1:0,gs.eliminated[1]?1:0,gs.eliminated[2]?1:0,gs.eliminated[3]?1:0],
     lv: [gs.lives[0],gs.lives[1],gs.lives[2],gs.lives[3]],
     sc: [gs.scores[0],gs.scores[1],gs.scores[2],gs.scores[3]],
+    // Magnet state + енергія (для HUD та візуалу півкола)
+    mg: [gs.magnet[0]?1:0, gs.magnet[1]?1:0, gs.magnet[2]?1:0, gs.magnet[3]?1:0],
+    me: [Math.round(gs.magEnergy[0]*100),Math.round(gs.magEnergy[1]*100),Math.round(gs.magEnergy[2]*100),Math.round(gs.magEnergy[3]*100)],
     // ── Передаємо які слоти зараз відключені ──
     dc: SLOTS.map(s => (room._disconnected && room._disconnected[s]) ? 1 : 0),
     pw: SLOTS.map(s=>{
