@@ -1178,19 +1178,23 @@ function tick(room) {
 
       // ── MAGNET HANDLING ──
       // Магніт активний, поки інп.magnet=true І є енергія.
-      // При переході active→inactive — release всіх утримуваних м'ячів.
+      // Гістерезис: щоб УВІМКНУТИ — потрібно >= MAG_MIN_ENERGY.
+      // Після увімкнення працює поки енергія > 0 (щоб не миготіло на 10%).
       const wasMagnet = gs.magnet[s];
       const wantMagnet = !!inp.magnet;
-      if (wantMagnet && gs.magEnergy[s] > MAG_MIN_ENERGY) {
-        gs.magnet[s] = true;
-        // Витрата енергії
-        gs.magEnergy[s] = Math.max(0, gs.magEnergy[s] - MAG_DRAIN_PER_MS * TICK_MS);
-      } else {
-        gs.magnet[s] = false;
+      let nowMagnet = false;
+      if (wantMagnet) {
+        if (wasMagnet) {
+          // Уже активний — працює поки є енергія
+          nowMagnet = gs.magEnergy[s] > 0;
+        } else {
+          // Перехід OFF→ON: потрібен поріг
+          nowMagnet = gs.magEnergy[s] >= MAG_MIN_ENERGY;
+        }
       }
-      // Якщо енергія закінчилась — примусово вимикаємо
-      if (gs.magEnergy[s] <= 0) {
-        gs.magnet[s] = false;
+      gs.magnet[s] = nowMagnet;
+      if (nowMagnet) {
+        gs.magEnergy[s] = Math.max(0, gs.magEnergy[s] - MAG_DRAIN_PER_MS * TICK_MS);
       }
       // Release: був активний → став неактивним
       if (wasMagnet && !gs.magnet[s]) {
