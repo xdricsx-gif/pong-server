@@ -751,7 +751,7 @@ const MAG_HOLD_DAMPING = 0.55;  // демпфування швидкості м'
 const MAG_DRAIN_PER_MS = 1/5000;    // 0.0002 — витрата енергії при утриманні
 const MAG_REGEN_PER_MS = 1/10000;   // 0.0001 — регенерація коли неактивний
 const MAG_RELEASE_PUSH = 3.5;   // швидкість вильоту при відпусканні (буде clamped до SMAX)
-const MAG_MIN_ENERGY   = 0.05;  // мінімум енергії для активації (щоб не "чіркати")
+const MAG_MIN_ENERGY   = 0.10;  // мінімум енергії для активації (щоб не "чіркати"). Нижче — повна блокування.
 
 // Перевірка: чи м'яч у півколі магніту перед ракеткою
 function isBallInMagnet(gs, s, ball) {
@@ -1844,7 +1844,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('input', ({ left, right, boost, hist, pos, boostPos, fieldPos }) => {
+  socket.on('input', ({ left, right, boost, magnet, hist, pos, boostPos, fieldPos }) => {
     if (!myRoom || !myRoom.players[socket.id]) return;
     const player = myRoom.players[socket.id];
     const gs = myRoom.game;
@@ -1854,7 +1854,7 @@ io.on('connection', (socket) => {
     const finalBoost = boost || anyBoost;
     // Якщо поточний pos відсутній але є в hist — беремо останній
     const effectivePos = pos !== undefined ? pos : (hist && hist.length > 0 ? hist[hist.length-1].pos : undefined);
-    player.input = { left, right, boost: finalBoost, fieldPos };
+    player.input = { left, right, boost: finalBoost, magnet: !!magnet, fieldPos };
     // Зберігаємо позицію при активації поля
     if (finalBoost && !player.input._boostSaved) {
       player.input.boostPos = boostPos;
