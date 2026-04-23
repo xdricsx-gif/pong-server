@@ -1975,10 +1975,7 @@ io.on('connection', (socket) => {
       const _inp = player.input;
       if (_inp && _inp.fieldPos !== undefined && gs.fields[slot] && gs.fields[slot].active) {
         const fpClamped = Math.max(mn, Math.min(mx, _inp.fieldPos));
-        const fpDiff = Math.abs(fpClamped - serverPos);
-        if (fpDiff <= MAX_DRIFT) {
-          gs.paddles[slot] = fpClamped;
-        }
+        gs.paddles[slot] = fpClamped;
         _inp.fieldPos = undefined;
       }
     }
