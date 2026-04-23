@@ -1379,7 +1379,19 @@ function broadcastState(room, sendBalls=true) {
   if (!gs) return;
   io.to(room.id).emit('gs', {
     seq: gs.tick,
-    balls: gs.balls.map(b=>({x:Math.round(b.x*10)/10,y:Math.round(b.y*10)/10,vx:Math.round(b.vx*100)/100,vy:Math.round(b.vy*100)/100,id:b.id})),
+    balls: gs.balls.map(b=>{
+      const out={x:Math.round(b.x*10)/10,y:Math.round(b.y*10)/10,vx:Math.round(b.vx*100)/100,vy:Math.round(b.vy*100)/100,id:b.id};
+      // Magnet flags: для якого slot м'яч схоплений і offset
+      for(let s=0;s<4;s++){
+        if(b['mag_held_'+s]){
+          out.mh=s; // magnet-held slot (0..3)
+          out.mox=Math.round((b['mag_offX_'+s]||0)*10)/10;
+          out.moy=Math.round((b['mag_offY_'+s]||0)*10)/10;
+          break;
+        }
+      }
+      return out;
+    }),
     respawns: gs.respawns.map(r=>({timer:Math.round(r.timer),vx:r.vx,vy:r.vy})),
     p: [Math.round(gs.paddles[0]),Math.round(gs.paddles[1]),Math.round(gs.paddles[2]),Math.round(gs.paddles[3])],
     e: [Math.round(gs.energy[0]*100),Math.round(gs.energy[1]*100),Math.round(gs.energy[2]*100),Math.round(gs.energy[3]*100)],
