@@ -778,7 +778,7 @@ function applyMagnetBall(gs, s, ball) {
   if (!gs.magnet[s]) return false;
   const info = isBallInMagnet(gs, s, ball);
   if (!info) return false;
-  const { fcx, fcy, dist, faceNx, faceNy, p } = info;
+  const { fcx, fcy, dist, faceNx, faceNy } = info;
   // Ціль притягання — трохи перед ракеткою (на 40% радіусу по нормалі)
   const targetDist = MAG_R * 0.40;
   const targetX = fcx + faceNx * targetDist;
@@ -786,17 +786,38 @@ function applyMagnetBall(gs, s, ball) {
   const toX = targetX - ball.x;
   const toY = targetY - ball.y;
   const toDist = Math.hypot(toX, toY);
-  if (toDist > 0.1) {
-    const tnx = toX / toDist, tny = toY / toDist;
-    // Сила притягання — пропорційна відстані до цілі (пружинка)
-    const pullStrength = Math.min(1, toDist / (MAG_R * 0.8));
-    ball.vx += tnx * MAG_PULL_FORCE * pullStrength;
-    ball.vy += tny * MAG_PULL_FORCE * pullStrength;
+
+  // ── Режим: LOCKED (м'яч близько до цілі) vs PULLING (ще тягне) ──
+  const LOCK_DIST = 12; // якщо ближче ніж 12px — вважаємо схопленим
+  if (toDist < LOCK_DIST) {
+    // ── LOCKED: ракетка тягне м'яч за собою ──
+    // Обчислюємо швидкість ракетки з paddlesPrev
+    const prevPos = gs.paddlesPrev ? (gs.paddlesPrev[s] != null ? gs.paddlesPrev[s] : gs.paddles[s]) : gs.paddles[s];
+    const paddleMove = gs.paddles[s] - prevPos;
+    const view = SLOT_VIEW[s];
+    const axisX = (view === 'bottom' || view === 'top') ? paddleMove : 0;
+    const axisY = (view === 'left' || view === 'right') ? paddleMove : 0;
+    // М'яч рухається синхронно з ракеткою + м'який pull до target
+    ball.vx = axisX + toX * 0.3;  // 30% корекції до цілі щоб не "дрифтав"
+    ball.vy = axisY + toY * 0.3;
+    // Також притискаємо м'яч ближче до target (щоб він не втік)
+    ball.x = ball.x + axisX;
+    ball.y = ball.y + axisY;
+  } else {
+    // ── PULLING: тягнемо м'яч до цілі ──
+    if (toDist > 0.1) {
+      const tnx = toX / toDist, tny = toY / toDist;
+      // Сильніше притягання якщо м'яч ще далеко
+      const pullStrength = Math.min(1.5, toDist / (MAG_R * 0.5));
+      ball.vx += tnx * MAG_PULL_FORCE * pullStrength;
+      ball.vy += tny * MAG_PULL_FORCE * pullStrength;
+    }
+    // Демпфування — гасимо швидкість щоб м'яч не пролітав далі
+    ball.vx *= MAG_HOLD_DAMPING;
+    ball.vy *= MAG_HOLD_DAMPING;
   }
-  // Демпфування — гасимо швидкість щоб м'яч не вилетів
-  ball.vx *= MAG_HOLD_DAMPING;
-  ball.vy *= MAG_HOLD_DAMPING;
-  // Позначаємо м'яч як utримуваний (для release при деактивації)
+
+  // Позначаємо м'яч як утримуваний (для release при деактивації)
   ball['mag_held_' + s] = true;
   return true;
 }
