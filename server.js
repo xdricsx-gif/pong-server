@@ -797,12 +797,11 @@ function applyMagnetBall(gs, s, ball) {
 
   // Поза зоною дії?
   if (dist > MAG_R + BR) {
-    // Якщо м'яч уже був захоплений і випав з зони — скидаємо
+    // Якщо м'яч уже був захоплений і випав з зони — випускаємо його через release
+    // (щоб м'яч не зависав з vx=vy=0 коли magnet його "випустив")
     if (ball['mag_held_' + s]) {
       console.log(`[MAG-LOSE] slot=${s} ball=${String(ball.id).slice(-4)} dist=${dist.toFixed(0)} (>83) pad=${Math.round(gs.paddles[s])}`);
-      delete ball['mag_held_' + s];
-      delete ball['mag_offX_' + s];
-      delete ball['mag_offY_' + s];
+      releaseMagnetBall(gs, s, ball, 0);
     }
     delete ball['_magInZone_' + s];
     return false;
@@ -812,10 +811,10 @@ function applyMagnetBall(gs, s, ball) {
   const frontDot = dx * nx + dy * ny;
   if (frontDot < 0) {
     // М'яч позаду — НЕ чіпаємо його швидкість взагалі.
-    // Інакше "краєм зачепився — швидкість збилась" баг.
-    // Якщо ВЖЕ був схоплений, але потрапив позаду — це розсинхрон, лог
+    // Якщо ВЖЕ був схоплений, але потрапив позаду — release (щоб не зависнув)
     if (ball['mag_held_' + s]) {
       console.log(`[MAG-BEHIND] slot=${s} ball=${String(ball.id).slice(-4)} ball=(${ball.x.toFixed(0)},${ball.y.toFixed(0)}) pad=${Math.round(gs.paddles[s])} fc=(${fcx.toFixed(0)},${fcy.toFixed(0)}) frontDot=${frontDot.toFixed(1)}`);
+      releaseMagnetBall(gs, s, ball, 0);
     }
     return false;
   }
