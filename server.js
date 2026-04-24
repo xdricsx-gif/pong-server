@@ -1283,16 +1283,25 @@ function tick(room) {
 
     for (let bi = gs.balls.length - 1; bi >= 0; bi--) {
       const ball = gs.balls[bi];
-      ball.x += ball.vx; ball.y += ball.vy;
+      // Якщо м'яч зараз захоплений магнітом — НЕ рухаємо його фізикою.
+      // Magnet ставить ball.x/y жорстко на paddle+offset, а рух по інерції тут
+      // створював би осцилляцію (v накопичується неправильно між тіками).
+      const isHeldAny = ball['mag_held_0']||ball['mag_held_1']||ball['mag_held_2']||ball['mag_held_3'];
+      if (!isHeldAny) {
+        ball.x += ball.vx; ball.y += ball.vy;
+      }
     // Округлення до 3 знаків — зменшує float drift між клієнтом і сервером
     ball.x=Math.round(ball.x*1000)/1000;
     ball.y=Math.round(ball.y*1000)/1000;
     ball.vx=Math.round(ball.vx*1000)/1000;
     ball.vy=Math.round(ball.vy*1000)/1000;
       // Continuous force field: викликаємо для ВСІХ полів, а не зупиняємось на першому
-      for (const s of SLOTS) {
-        if (gs.eliminated[s]) continue;
-        applyFFBall(gs, s, ball);
+      // Для magnet-held м'ячів пропускаємо FF (magnet все одно перезапише позицію).
+      if (!isHeldAny) {
+        for (const s of SLOTS) {
+          if (gs.eliminated[s]) continue;
+          applyFFBall(gs, s, ball);
+        }
       }
       // Magnetic field: притягання/утримання м'ячів
       for (const s of SLOTS) {
@@ -1301,7 +1310,9 @@ function tick(room) {
       }
       resolveChamfersBall(ball);
       clampBallObj(ball);
+      // Paddle collisions — пропускаємо для magnet-held (м'яч вже фіксований на paddle)
       let hit = false;
+      if (!isHeldAny) {
       for (const s of SLOTS) {
         if (gs.eliminated[s]) continue;
         const p = slotToPaddle(s, gs.paddles[s], gs, room);
@@ -1343,6 +1354,7 @@ function tick(room) {
         if (gs.eliminated[3]) { ball.vx = -Math.abs(ball.vx); }
         else { if (!goal(3)) spawnBallQueued(gs); gs.balls.splice(bi,1); }
       }
+      } // end if (!isHeldAny) для paddle/goal блоків
       if (gs.gameOver) { broadcastState(room); return; }
     }
     broadcastState(room, sendBalls);
