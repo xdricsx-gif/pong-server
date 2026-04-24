@@ -860,8 +860,18 @@ function applyMagnetBall(gs, s, ball) {
   // ── ЗАХОПЛЕНИЙ: жорстка прив'язка до ракетки ──
   const offX = ball[offKey_X] || 0;
   const offY = ball[offKey_Y] || 0;
-  const newX = fcx + offX;
-  const newY = fcy + offY;
+  // Safety clamp: offset не повинен перевищувати MAG_R (щоб м'яч не виходив з зони при русі paddle)
+  const offDist = Math.hypot(offX, offY);
+  if (offDist > MAG_R * 0.85) {
+    // Нормалізуємо до 85% від радіуса — лишаємо запас щоб не випадав з зони
+    const scale = (MAG_R * 0.85) / offDist;
+    ball[offKey_X] = offX * scale;
+    ball[offKey_Y] = offY * scale;
+  }
+  const finalOffX = ball[offKey_X] || 0;
+  const finalOffY = ball[offKey_Y] || 0;
+  const newX = fcx + finalOffX;
+  const newY = fcy + finalOffY;
   // Debug: якщо м'яч різко перестрибнув (ознака розсинхрону)
   const moveDelta = Math.hypot(newX - ball.x, newY - ball.y);
   if (moveDelta > 15) {
