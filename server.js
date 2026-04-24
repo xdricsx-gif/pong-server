@@ -2002,11 +2002,19 @@ io.on('connection', (socket) => {
       const diff = Math.abs(clampedPos - serverPos);
 
       // Server-follows-client: беремо клієнтську позицію (prediction вже валідована клампами + швидкістю).
-      // Раніше був MAX_DRIFT guard, але він створював довге drift'ування (>80мс) при rollback/magnet release.
-      // Замість guard'а — клієнт вже клампує за спідом ракетки (paddle.spd).
-      gs.paddles[slot] = clampedPos;
+      // АЛЕ: коли магніт активний, обмежуємо максимальний delta за тік щоб м'яч не "стрибав" 
+      // через network batching (коли кілька пакетів прийшли разом після паузи).
+      if (gs.magnet && gs.magnet[slot] && diff > 8) {
+        // Обмежуємо рух paddle до 3×швидкості за тік — достатньо швидко щоб догнати,
+        // але не стрибком (бо m'яч жорстко прив'язаний до paddle при magnet)
+        const maxDelta = (pStats.spd || PS) * 3;
+        const dir = clampedPos > serverPos ? 1 : -1;
+        gs.paddles[slot] = serverPos + dir * Math.min(diff, maxDelta);
+      } else {
+        gs.paddles[slot] = clampedPos;
+      }
       if (diff > 80) {
-        console.log(`Paddle jump slot${slot}: diff=${diff.toFixed(0)}px (accepted)`);
+        console.log(`Paddle jump slot${slot}: diff=${diff.toFixed(0)}px (accepted, mag=${!!gs.magnet[slot]})`);
       }
 
       // Якщо поле активне — використовуємо fieldPos для точної синхронізації відбиття
