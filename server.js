@@ -804,6 +804,7 @@ function applyMagnetBall(gs, s, ball) {
       delete ball['mag_offX_' + s];
       delete ball['mag_offY_' + s];
     }
+    delete ball['_magInZone_' + s];
     return false;
   }
 
@@ -837,6 +838,7 @@ function applyMagnetBall(gs, s, ball) {
       ball[offKey_Y] = ball.y - fcy;
       ball.vx = 0;
       ball.vy = 0;
+      delete ball['_magInZone_' + s];
       console.log(`[MAG-CAPTURE] slot=${s} ball=${String(ball.id).slice(-4)} off=(${ball[offKey_X].toFixed(1)},${ball[offKey_Y].toFixed(1)}) pad=${Math.round(gs.paddles[s])} fc=(${fcx.toFixed(0)},${fcy.toFixed(0)})`);
     } else {
       // Тягнемо — тільки додаємо імпульс, БЕЗ damping.
@@ -846,6 +848,11 @@ function applyMagnetBall(gs, s, ball) {
         const pull = MAG_PULL_FORCE * 2.0;
         ball.vx += tnx * pull;
         ball.vy += tny * pull;
+      }
+      // Логуємо м'ячі що проводять багато тіків у зоні без захоплення (можуть "відскочити" назовні)
+      ball['_magInZone_' + s] = (ball['_magInZone_' + s] || 0) + 1;
+      if (ball['_magInZone_' + s] === 10 || ball['_magInZone_' + s] === 20) {
+        console.log(`[MAG-STUCK] slot=${s} ball=${String(ball.id).slice(-4)} ticks=${ball['_magInZone_' + s]} toD=${toD.toFixed(0)} v=(${ball.vx.toFixed(1)},${ball.vy.toFixed(1)}) dist=${dist.toFixed(0)}`);
       }
     }
     return true;
@@ -870,7 +877,7 @@ function applyMagnetBall(gs, s, ball) {
 }
 
 // Release: м'яч вилетів з магніту. Напрямок залежить від збереженого offset'а вздовж ракетки.
-function releaseMagnetBall(gs, s, ball) {
+function releaseMagnetBall(gs, s, ball, releaseIndex) {
   if (!ball['mag_held_' + s]) return;
   // Використовуємо ЗБЕРЕЖЕНИЙ offset — не поточну позицію (вона могла оновитись)
   const offX = ball['mag_offX_' + s] || 0;
@@ -894,6 +901,12 @@ function releaseMagnetBall(gs, s, ball) {
   const half = p.w/2 * (tx !== 0 ? 1 : 0) + p.h/2 * (ty !== 0 ? 1 : 0);
   let k = tangentOffset / Math.max(half, 1);
   if (k > 1) k = 1; else if (k < -1) k = -1;
+  // Якщо декілька м'ячів release одночасно — розводимо по куту
+  // Кожний наступний отримує зсув кута щоб не накладалися на release position
+  const indexOffset = (releaseIndex||0) * 0.20; // ~11° зсув за кожний м'яч
+  // Направлення зсуву — у сторону де більше місця (поза clamp-ом)
+  k = k + (k >= 0 ? -indexOffset : indexOffset);
+  if (k > 1) k = 1; else if (k < -1) k = -1;
   // Вихідний вектор: переважно по нормалі, з кутом до 60° в бік зсуву
   const MAX_ANGLE = Math.PI / 3;
   const angle = k * MAX_ANGLE;
@@ -903,14 +916,15 @@ function releaseMagnetBall(gs, s, ball) {
   const targetSp = Math.min(MAG_RELEASE_PUSH, SMAX);
   ball.vx = outX * targetSp;
   ball.vy = outY * targetSp;
-  // Виштовхуємо м'яч за межу магніту
-  ball.x = fcx + outX * (MAG_R + BR + 2);
-  ball.y = fcy + outY * (MAG_R + BR + 2);
+  // Виштовхуємо м'яч за межу магніту + додаємо distance для різних м'ячів щоб точно не перекривались
+  const pushDist = MAG_R + BR + 2 + (releaseIndex||0) * BR;
+  ball.x = fcx + outX * pushDist;
+  ball.y = fcy + outY * pushDist;
   ball.x  = Math.round(ball.x  * 10) / 10;
   ball.y  = Math.round(ball.y  * 10) / 10;
   ball.vx = Math.round(ball.vx * 10) / 10;
   ball.vy = Math.round(ball.vy * 10) / 10;
-  console.log(`[MAG-RELEASE] slot=${s} ball=${String(ball.id).slice(-4)} pos=(${ball.x.toFixed(0)},${ball.y.toFixed(0)}) v=(${ball.vx.toFixed(1)},${ball.vy.toFixed(1)}) k=${k.toFixed(2)} angle=${(angle*180/Math.PI).toFixed(0)}deg pad=${Math.round(gs.paddles[s])}`);
+  console.log(`[MAG-RELEASE] slot=${s} ball=${String(ball.id).slice(-4)} idx=${releaseIndex||0} pos=(${ball.x.toFixed(0)},${ball.y.toFixed(0)}) v=(${ball.vx.toFixed(1)},${ball.vy.toFixed(1)}) k=${k.toFixed(2)} angle=${(angle*180/Math.PI).toFixed(0)}deg pad=${Math.round(gs.paddles[s])}`);
 }
 
 
@@ -1190,7 +1204,13 @@ function tick(room) {
       }
       // Release: був активний → став неактивним
       if (wasMagnet && !gs.magnet[s]) {
-        for (const b of gs.balls) releaseMagnetBall(gs, s, b);
+        let relIdx = 0;
+        for (const b of gs.balls) {
+          if (b['mag_held_' + s]) {
+            releaseMagnetBall(gs, s, b, relIdx);
+            relIdx++;
+          }
+        }
       }
       // Регенерація — тільки коли неактивний
       if (!gs.magnet[s]) {
