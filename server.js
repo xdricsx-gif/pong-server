@@ -1432,8 +1432,14 @@ const _srvStats = {};
 function broadcastState(room, sendBalls=true) {
   const gs = room.game;
   if (!gs) return;
+  // Broadcast id — окремий лічильник (тільки broadcasts) для клієнтського
+  // packet loss detection. seq=tick біжить 60Hz (включаючи пропущені), а bid
+  // інкрементиться рівно ОДИН раз на кожен реальний broadcast (~30Hz нормально,
+  // частіше при force broadcast). Клієнт використовує bid для loss%.
+  gs._broadcastId = (gs._broadcastId || 0) + 1;
   io.to(room.id).emit('gs', {
     seq: gs.tick,
+    bid: gs._broadcastId, // broadcast index для loss detection
     st: Date.now(), // server time для clock sync на клієнті
     balls: gs.balls.map(b=>{
       const out={x:Math.round(b.x*10)/10,y:Math.round(b.y*10)/10,vx:Math.round(b.vx*100)/100,vy:Math.round(b.vy*100)/100,id:b.id};
