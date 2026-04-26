@@ -1107,7 +1107,13 @@ function tick(room) {
   const gs = room.game;
   if (!gs || gs.gameOver) return;
   gs.tick++;
+  // ── SNAPSHOT RATE: 30Hz (every 2nd physics tick) ──
+  // Physics ticks 60Hz для точної фізики, broadcasts 30Hz для економії трафіку.
+  // Клієнт інтерполює між snapshots і робить deterministic ball simulation
+  // на 60Hz, тому плавність не страждає, а трафік -50%.
+  // Винятки: коли gameOver або important events — broadcast одразу.
   const sendBalls = true; // Lockstep: надсилаємо стан кожен тік
+  // shouldBroadcast визначається пізніше при виклику broadcastState
   try {
     for (const s of SLOTS) {
       if (gs.eliminated[s]) continue;
@@ -1122,6 +1128,8 @@ function tick(room) {
           gs.fields[s].active = false;
           gs.fields[s].t = 0;
           gs.fields[s].r = 0;
+          // Force broadcast — клієнт має одразу дізнатись що поле вимкнулось
+          gs._forceNextBroadcast = true;
           // Очистити hit-прапори: наступна активація зможе дати reflection при вході
           const _hk = 'ff_hit_' + s;
           for (const b of gs.balls) { delete b[_hk]; }
@@ -1157,6 +1165,8 @@ function tick(room) {
           gs.fields[s].r = 0;
           gs.fields[s].maxR = pStats?.fr || FR;
           gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
+          // Force broadcast — активація поля має одразу дійти до всіх
+          gs._forceNextBroadcast = true;
 
           // Client-authoritative boost position:
           // Якщо клієнт надіслав позицію при активації — перевіряємо чи надійна
@@ -1208,6 +1218,10 @@ function tick(room) {
         }
       }
       gs.magnet[s] = nowMagnet;
+      // Force broadcast при зміні magnet state (capture/release має дійти миттєво)
+      if (wasMagnet !== nowMagnet) {
+        gs._forceNextBroadcast = true;
+      }
       if (nowMagnet) {
         gs.magEnergy[s] = Math.max(0, gs.magEnergy[s] - MAG_DRAIN_PER_MS * TICK_MS);
       }
@@ -1288,12 +1302,16 @@ function tick(room) {
       if (gs.respawns[i].timer <= 0) {
         gs.balls.push({ x: W/2, y: H/2, vx: gs.respawns[i].vx, vy: gs.respawns[i].vy, id: Date.now()+i });
         gs.respawns.splice(i, 1);
+        // Новий м'яч на полі — клієнт має одразу дізнатись
+        gs._forceNextBroadcast = true;
       }
     }
 
     const goal = (slot) => {
       if (gs.eliminated[slot]) return false;
       gs.scores[slot]++; gs.lives[slot]--;
+      // ── Force broadcast: гол — критична подія, не чекаємо 30Hz tick ──
+      gs._forceNextBroadcast = true;
       if (gs.lives[slot] <= 0) {
         markEliminated(gs, slot, 'lives');
         // Якщо відключений гравець вибув — відміняємо його таймер реконекту
@@ -1386,7 +1404,14 @@ function tick(room) {
       } // end if (!isHeldAny) для paddle/goal блоків
       if (gs.gameOver) { broadcastState(room); return; }
     }
-    broadcastState(room, sendBalls);
+    // ── BROADCAST 30Hz (every 2nd tick) + force broadcast при важливих подіях ──
+    // Force broadcast: коли голу щойно забили, поле активувалось/деактивувалось,
+    // магніт capture/release, або кулька народилась/зникла.
+    const _shouldForce = gs._forceNextBroadcast === true;
+    if (gs.tick % 2 === 0 || _shouldForce) {
+      broadcastState(room, sendBalls);
+      gs._forceNextBroadcast = false;
+    }
 
     // ── В КІНЦІ тіку зберігаємо поточні позиції як previous ──
     // Наступний тік читатиме V_paddle = paddles − paddlesPrev як зміну за 1 тік
@@ -1409,6 +1434,7 @@ function broadcastState(room, sendBalls=true) {
   if (!gs) return;
   io.to(room.id).emit('gs', {
     seq: gs.tick,
+    st: Date.now(), // server time для clock sync на клієнті
     balls: gs.balls.map(b=>{
       const out={x:Math.round(b.x*10)/10,y:Math.round(b.y*10)/10,vx:Math.round(b.vx*100)/100,vy:Math.round(b.vy*100)/100,id:b.id};
       // Magnet flags: для якого slot м'яч схоплений і offset
@@ -1970,6 +1996,16 @@ io.on('connection', (socket) => {
     } else {
       socket.emit('rejoin:fail', { reason: 'unknown_status' });
     }
+  });
+
+  // ──────────────────────────────────────────────
+  // ── NETCODE: Ping/Pong + Clock Sync ──────────
+  // Клієнт шле ('np', clientTime). Сервер відповідає одразу
+  // з його timestamp. Клієнт отримує RTT + може обчислити
+  // server clock offset.
+  // ──────────────────────────────────────────────
+  socket.on('np', (clientT) => {
+    socket.emit('np', { c: clientT, s: Date.now() });
   });
 
   socket.on('input', ({ left, right, boost, magnet, hist, pos, boostPos, fieldPos }) => {
