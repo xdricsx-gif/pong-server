@@ -2561,6 +2561,11 @@ function registerShopHandlers(socket) {
         if (!privSnap.exists) throw { code: 'user_not_found' };
         const priv = privSnap.data();
 
+        // Захист від марної покупки: якщо енергії >=80, не дозволяємо
+        // (за оптимальної гри 5 ігор по 20 енергії = 100, при 80+ покупка дає <20 пользы)
+        const currentEnergy = (priv.energy != null) ? priv.energy : 100;
+        if (currentEnergy >= 80) throw { code: 'energy_already_high' };
+
         const gold = priv.gold || 0;
         if (gold < ENERGY_GOLD_COST_SRV) throw { code: 'not_enough_gold' };
 
