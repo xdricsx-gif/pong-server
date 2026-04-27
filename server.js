@@ -624,6 +624,74 @@ const FF_REFLECT_PUSH      = 1.0;   // одноразовий push при вхо
 const FF_PULSE_FORCE       = 0.28;  // базовий континуальний імпульс за тік
 const FF_PULSE_CENTER_MULT = 4.5;   // множник у центрі поля (на 50% проникнення ≈ 2× сила)
 const FF_MIN_SP            = 2.5;
+
+// ═══════════════════════════════════════════════════════
+// ── ELIMINATION WALL PHYSICS ──
+// Коли гравець вибуває (lives=0) — його ворота стають постійним
+// силовим полем. Відрізняється від звичайного FF:
+// - Active завжди (не залежить від energy)
+// - Випадкове відхилення нормалі (chaos factor) — м'яч відлітає
+//   у непередбачуваному напрямку для більш цікавої гри
+// - Boost: підсилює швидкість м'яча (як FF reflect, але без paddle vel)
+// - Працює як "стіна-портал" — м'яч відбивається з мінімальною швидкістю
+//   щоб не застрягав біля воріт
+// ═══════════════════════════════════════════════════════
+const ELIM_WALL_BOOST       = 1.30;  // множник speed після відскоку (+30%)
+const ELIM_WALL_RANDOM_DEG  = 25;    // ±25° випадкового відхилення
+const ELIM_WALL_MIN_SP      = 3.5;   // мінімальна швидкість після відскоку
+const ELIM_WALL_MAX_SP      = 6.5;   // максимальна (clamp)
+
+function applyEliminatedWall(gs, slot, ball) {
+  // slot: 0=bottom, 1=top, 2=left, 3=right
+  // Нормаль "у центр поля" від воріт
+  let nx, ny;
+  const view = SLOT_VIEW[slot];
+  if (view === 'bottom')     { nx = 0; ny = -1; }
+  else if (view === 'top')   { nx = 0; ny =  1; }
+  else if (view === 'left')  { nx = 1; ny =  0; }
+  else                       { nx =-1; ny =  0; }
+
+  // Класичне reflection
+  const vDotN = ball.vx * nx + ball.vy * ny;
+  let reflVx = ball.vx - 2 * vDotN * nx;
+  let reflVy = ball.vy - 2 * vDotN * ny;
+
+  // Випадкове відхилення (rotate vector by ±RANDOM_DEG)
+  const randAngle = (Math.random() * 2 - 1) * ELIM_WALL_RANDOM_DEG * Math.PI / 180;
+  const cosA = Math.cos(randAngle), sinA = Math.sin(randAngle);
+  const rotX = reflVx * cosA - reflVy * sinA;
+  const rotY = reflVx * sinA + reflVy * cosA;
+  reflVx = rotX; reflVy = rotY;
+
+  // Boost speed
+  reflVx *= ELIM_WALL_BOOST;
+  reflVy *= ELIM_WALL_BOOST;
+
+  // Clamp + ensure outward direction
+  let sp = Math.hypot(reflVx, reflVy);
+  if (sp < ELIM_WALL_MIN_SP) {
+    // Якщо швидкість занадто мала — додаємо push в напрямку нормалі
+    const k = ELIM_WALL_MIN_SP / Math.max(0.1, sp);
+    reflVx *= k; reflVy *= k;
+    sp = ELIM_WALL_MIN_SP;
+  }
+  if (sp > ELIM_WALL_MAX_SP) {
+    const k = ELIM_WALL_MAX_SP / sp;
+    reflVx *= k; reflVy *= k;
+  }
+
+  // Перевіряємо що швидкість напрямлена ВІД воріт (outward)
+  const newVDotN = reflVx * nx + reflVy * ny;
+  if (newVDotN < 0.5) {
+    // Випадкове відхилення завернуло м'яч назад — додаємо нормальну компоненту
+    reflVx += nx * (1.0 - newVDotN);
+    reflVy += ny * (1.0 - newVDotN);
+  }
+
+  ball.vx = reflVx;
+  ball.vy = reflVy;
+}
+
 function applyFFBall(gs, s, ball) {
   const f = gs.fields[s];
   if (!f || !f.active) return false;
@@ -1093,6 +1161,11 @@ function markEliminated(gs, slot, reason) {
   if (!gs.eliminationOrder.includes(slot)) {
     gs.eliminationOrder.push(slot);
   }
+  // ── Event trigger для client-side animation (V2 Electric Arc) ──
+  // Broadcast'иться один раз з force flag, потім очищається в tick
+  if (!gs._elimEvents) gs._elimEvents = [];
+  gs._elimEvents.push(slot);
+  gs._forceNextBroadcast = true;
   console.log(`[elim] slot=${slot} reason=${reason} order=[${gs.eliminationOrder.join(',')}]`);
   return true;
 }
@@ -1388,17 +1461,33 @@ function tick(room) {
       }
       if (hit) continue;
       const by = ball.y, bx2 = ball.x;
+      // ── ELIMINATION WALL: ворота вибулого гравця стали FF-стіною ──
+      // Замість простого vy=abs(vy) — застосовуємо boost + random spread,
+      // щоб гра з вибуваючими гравцями ставала всё більш chaotic та цікавою
       if (by-BR < 0 && bx2 > C && bx2 < W-C) {
-        if (gs.eliminated[1]) { ball.vy = Math.abs(ball.vy); }
+        if (gs.eliminated[1]) {
+          // Спершу clamp position — м'яч не повинен пройти за лінію
+          ball.y = BR;
+          applyEliminatedWall(gs, 1, ball);
+        }
         else { if (!goal(1)) spawnBallQueued(gs); gs.balls.splice(bi,1); }
       } else if (by+BR > H && bx2 > C && bx2 < W-C) {
-        if (gs.eliminated[0]) { ball.vy = -Math.abs(ball.vy); }
+        if (gs.eliminated[0]) {
+          ball.y = H - BR;
+          applyEliminatedWall(gs, 0, ball);
+        }
         else { if (!goal(0)) spawnBallQueued(gs); gs.balls.splice(bi,1); }
       } else if (bx2-BR < 0 && by > C && by < H-C) {
-        if (gs.eliminated[2]) { ball.vx = Math.abs(ball.vx); }
+        if (gs.eliminated[2]) {
+          ball.x = BR;
+          applyEliminatedWall(gs, 2, ball);
+        }
         else { if (!goal(2)) spawnBallQueued(gs); gs.balls.splice(bi,1); }
       } else if (bx2+BR > W && by > C && by < H-C) {
-        if (gs.eliminated[3]) { ball.vx = -Math.abs(ball.vx); }
+        if (gs.eliminated[3]) {
+          ball.x = W - BR;
+          applyEliminatedWall(gs, 3, ball);
+        }
         else { if (!goal(3)) spawnBallQueued(gs); gs.balls.splice(bi,1); }
       }
       } // end if (!isHeldAny) для paddle/goal блоків
@@ -1411,6 +1500,8 @@ function tick(room) {
     if (gs.tick % 2 === 0 || _shouldForce) {
       broadcastState(room, sendBalls);
       gs._forceNextBroadcast = false;
+      // Очищуємо elim events після broadcast — щоб не дублювались
+      if (gs._elimEvents && gs._elimEvents.length) gs._elimEvents = [];
     }
 
     // ── В КІНЦІ тіку зберігаємо поточні позиції як previous ──
@@ -1476,6 +1567,8 @@ function broadcastState(room, sendBalls=true) {
       gs.fields[3].maxR || FR,
     ],
     el: [gs.eliminated[0]?1:0,gs.eliminated[1]?1:0,gs.eliminated[2]?1:0,gs.eliminated[3]?1:0],
+    // ── Elimination events (трігер анімації на клієнті, очищається після broadcast) ──
+    elev: gs._elimEvents && gs._elimEvents.length ? [...gs._elimEvents] : undefined,
     lv: [gs.lives[0],gs.lives[1],gs.lives[2],gs.lives[3]],
     sc: [gs.scores[0],gs.scores[1],gs.scores[2],gs.scores[3]],
     // Magnet state + енергія (для HUD та візуалу півкола)
