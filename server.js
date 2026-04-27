@@ -248,6 +248,54 @@ const HANGAR_COSTS_SRV = [
   {cur:'gold',   price:400},
 ];
 
+// ═══════════════════════════════════════════════════════
+// ── LINEAR SUBLEVEL SYSTEM (server) ──
+// 5 levels × 10 sublevels = 50 послідовних апгрейдів
+// HANGAR_SUB_COSTS_SRV[i] = ціна купівлі sub'у i (для переходу sub=i-1 → i)
+// Лінійна прогресія цін: дешеві ранні, дорогі пізні (gold для L4-L5)
+// ═══════════════════════════════════════════════════════
+const MAX_SUB_SRV = 50;
+const HANGAR_SUB_COSTS_SRV = (function(){
+  const arr = [null];
+  for(let i=1; i<=50; i++){
+    if(i<=10){
+      arr.push({cur:'silver', price: 1500 + (i-1)*800});      // 1500..8700 silver (L1)
+    } else if(i<=20){
+      arr.push({cur:'silver', price: 12000 + (i-11)*2000});   // 12000..30000 silver (L2)
+    } else if(i<=30){
+      arr.push({cur:'silver', price: 35000 + (i-21)*3500});   // 35000..66500 silver (L3)
+    } else if(i<=40){
+      arr.push({cur:'gold', price: 100 + (i-31)*20});         // 100..280 gold (L4)
+    } else {
+      arr.push({cur:'gold', price: 320 + (i-41)*55});         // 320..815 gold (L5)
+    }
+  }
+  return arr;
+})();
+
+// Множник на основі рівня — L1=1.00, L2=1.06, L3=1.13, L4=1.21, L5=1.30
+function getLevelMultSrv(level){
+  return [1.00, 1.00, 1.06, 1.13, 1.21, 1.30][level] || 1.00;
+}
+
+// Переводимо sub → {level, sublevel}
+function subToLevelSrv(sub){
+  sub = Math.max(0, Math.min(MAX_SUB_SRV, sub|0));
+  const level = Math.min(5, Math.floor(sub/10) + 1);
+  const sublevel = (level === 5) ? Math.min(10, sub - 40) : (sub % 10);
+  return {level, sublevel};
+}
+
+// Отримуємо поточний sub з hangar object (з міграцією з legacy 6-параметрів)
+function getHangarSubSrv(hangar){
+  if(!hangar) return 0;
+  if(typeof hangar.sub === 'number') return Math.max(0, Math.min(MAX_SUB_SRV, hangar.sub));
+  // Migration: sum of (part-1) over 6 параметрів, max 54 → clamp to 50
+  let total = 0;
+  ['w','spd','fr','bm','er','fd'].forEach(p => { total += (hangar[p]||1) - 1; });
+  return Math.min(MAX_SUB_SRV, total);
+}
+
 // Швидкості ракеток для розрахунку швидкості ботів
 const PADDLE_SPD_SRV = [
   3.375,3.375,4.5,3.375,3.375,3.375,3.375,3.375,4.5,3.375,
@@ -322,28 +370,31 @@ const DEFAULT_PADDLE_STATS = Object.freeze({
 });
 
 // Pure функція — розраховує фінальні stats без I/O.
-// hangars — { '5': {w:3, spd:7, ...}, '12': {...} }  (ключ — paddleId як string)
+// hangars — { '5': {sub:13} or legacy {w:3, spd:7, ...}, '12': {...} }
 function computePaddleStats(paddleId, hangars) {
   const pid = (paddleId|0);
   const base = PADDLE_CATALOG_SRV[pid] || PADDLE_CATALOG_SRV[0];
   const hangarForPid = (hangars && (hangars[pid] || hangars[String(pid)])) || {};
   const result = { paddleId: pid };
-  let sumLv = 0;
+
+  // ── НОВА ЛОГІКА: множник на основі рівня (з sub) ──
+  // L1=1.00, L2=1.06, L3=1.13, L4=1.21, L5=1.30
+  // Стати міняються тільки при milestone (level up), не при кожному sublevel.
+  const sub = getHangarSubSrv(hangarForPid);
+  const info = subToLevelSrv(sub);
+  const mult = getLevelMultSrv(info.level);
+
   for (const part of HANGAR_PARTS_SRV) {
-    const lv = hangarForPid[part] || 1;
-    const mult = hangarMultSrv(lv);
     result[part] = +(base[part] * mult).toFixed(3);
-    sumLv += lv;
   }
-  // avgUpgrade — середній прогрес апгрейдів як ДРІБ 0..1
-  // (контракт з клієнтом: getPaddleAvgUpgrade() повертає 0..1)
-  // MAX_LVL=9 — рівень 1 = 0 апгрейдів, рівень 10 = 9 апгрейдів
-  const MAX_LV = 9;
-  let totalUpgrades = 0;
-  for (const part of HANGAR_PARTS_SRV) {
-    totalUpgrades += (hangarForPid[part] || 1) - 1;
-  }
-  result.avgUpgrade = totalUpgrades / (HANGAR_PARTS_SRV.length * MAX_LV);
+
+  // avgUpgrade тепер = sub/MAX_SUB для backward compat з старим клієнтом
+  result.avgUpgrade = sub / MAX_SUB_SRV;
+  // Додатково даємо рівень/sublevel — клієнт може використовувати для UI
+  result.level = info.level;
+  result.sublevel = info.sublevel;
+  result.sub = sub;
+
   return result;
 }
 
@@ -371,15 +422,21 @@ async function loadValidatedPaddleStats(uid) {
       paddleId = ownedPaddles.includes(0) ? 0 : (ownedPaddles[0]|0);
     }
 
-    // Валідація рівнів апгрейдів: clamp в [1..10]
+    // Валідація рівнів апгрейдів: clamp в [1..10] для legacy полів,
+    // [0..50] для нового sub поля
     const rawHangars = priv.hangars && typeof priv.hangars === 'object' ? priv.hangars : {};
     const safeHangars = {};
     for (const [pid, parts] of Object.entries(rawHangars)) {
       if (!parts || typeof parts !== 'object') continue;
       safeHangars[pid] = {};
+      // Legacy 6-параметрів (для backward compatibility / migration)
       for (const part of HANGAR_PARTS_SRV) {
         const lv = parts[part]|0;
         safeHangars[pid][part] = Math.max(1, Math.min(10, lv || 1));
+      }
+      // Нове поле sub (5×10 sublevels)
+      if (typeof parts.sub === 'number') {
+        safeHangars[pid].sub = Math.max(0, Math.min(MAX_SUB_SRV, parts.sub|0));
       }
     }
 
@@ -471,7 +528,8 @@ function getPublicConfig() {
   return {
     version: CONFIG_VERSION,
     paddleCatalog: PADDLE_CATALOG_FULL,
-    hangarCosts: HANGAR_COSTS_SRV,       // null, silver/gold ціни за рівень
+    hangarCosts: HANGAR_COSTS_SRV,       // null, silver/gold ціни за рівень (LEGACY)
+    hangarSubCosts: HANGAR_SUB_COSTS_SRV, // нова лінійна прокачка (5×10 = 50)
     energyGoldCost: ENERGY_GOLD_COST_SRV,
     game: {
       W, H, C, BR, SMAX, PL, PLV, PTH, PTV,
@@ -2423,6 +2481,70 @@ function registerShopHandlers(socket) {
     } catch(e) {
       if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
       console.error('shop:upgrade_hangar', e.message);
+      socket.emit('shop:error', { msg: 'server_error' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════
+  // ── shop:upgrade_next — нова лінійна прокачка (5×10 sublevels) ──
+  // Інкрементує sub на 1. Сервер сам обчислює рівень+sublevel з sub.
+  // На відміну від upgrade_hangar — не вимагає вибору параметра.
+  // ═══════════════════════════════════════════════════════
+  socket.on('shop:upgrade_next', async ({ paddleId }) => {
+    if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
+    if (!socket.uid) return socket.emit('shop:error', { msg: 'auth_required' });
+    const pid = parseInt(paddleId);
+    if (!Number.isFinite(pid) || pid < 0 || pid > 19) return socket.emit('shop:error', { msg: 'invalid_paddle' });
+
+    const privRef = db.collection('users_private').doc(socket.uid);
+
+    try {
+      const result = await db.runTransaction(async (tx) => {
+        const privSnap = await tx.get(privRef);
+        if (!privSnap.exists) throw { code: 'user_not_found' };
+        const priv = privSnap.data();
+
+        const hangars = priv.hangars || {};
+        const currentSub = getHangarSubSrv(hangars[pid] || {});
+        if (currentSub >= MAX_SUB_SRV) throw { code: 'max_sublevel' };
+
+        const newSub = currentSub + 1;
+        // Cost = ціна *цільового* sub (тобто newSub)
+        const cost = HANGAR_SUB_COSTS_SRV[newSub];
+        if (!cost) throw { code: 'invalid_sublevel' };
+
+        const silver = priv.silver || 0;
+        const gold   = priv.gold   || 0;
+        if (cost.cur === 'silver' && silver < cost.price) throw { code: 'not_enough_silver' };
+        if (cost.cur === 'gold'   && gold   < cost.price) throw { code: 'not_enough_gold' };
+
+        // Записуємо тільки sub (нове поле). Старі поля {w,spd,...} залишаються
+        // незмінними у БД для backward compatibility, але більше не використовуються
+        const upd = {};
+        upd[`hangars.${pid}.sub`] = newSub;
+        let newSilver = silver, newGold = gold;
+        if (cost.cur === 'silver') { upd.silver = silver - cost.price; newSilver = upd.silver; }
+        if (cost.cur === 'gold')   { upd.gold   = gold   - cost.price; newGold   = upd.gold; }
+
+        tx.update(privRef, upd);
+        const info = subToLevelSrv(newSub);
+        return { paddleId: pid, newSub, level: info.level, sublevel: info.sublevel, silver: newSilver, gold: newGold, cur: cost.cur };
+      });
+
+      socket.emit('shop:upgraded_next', {
+        paddleId: result.paddleId,
+        sub: result.newSub,
+        level: result.level,
+        sublevel: result.sublevel,
+        ...(result.cur === 'silver' ? { silver: result.silver } : { gold: result.gold }),
+      });
+      trackEvent('purchase', {
+        uid: socket.uid, kind: 'hangar_sub', item: `${result.paddleId}:sub:${result.newSub}`,
+        amount: HANGAR_SUB_COSTS_SRV[result.newSub]?.price, cur: result.cur,
+      });
+    } catch(e) {
+      if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
+      console.error('shop:upgrade_next', e.message);
       socket.emit('shop:error', { msg: 'server_error' });
     }
   });
