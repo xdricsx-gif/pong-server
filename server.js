@@ -497,6 +497,46 @@ async function loadValidatedRating(uid) {
 }
 
 // ══════════════════════════════════════════════════════
+// LEVEL — потрібен для калібровки сили ботів у training mode
+// Більший рівень → сильніші боти. Скейл synced з client `LEVEL_XP`.
+// ══════════════════════════════════════════════════════
+const LEVEL_XP_SRV = [
+  0, 150, 350, 650, 1050, 1600, 2350, 3300, 4500, 6000,
+  8000, 10500, 13500, 17000, 21500, 27000, 33500, 41000, 50000, 61000
+];
+const MAX_LEVEL_SRV = 20;
+function calcLevelSrv(xp) {
+  xp = (typeof xp === 'number' && xp >= 0) ? xp : 0;
+  for (let lv = MAX_LEVEL_SRV; lv >= 1; lv--) {
+    if (xp >= LEVEL_XP_SRV[lv-1]) return lv;
+  }
+  return 1;
+}
+async function loadUserLevel(uid) {
+  if (!db || !uid) return 1;
+  try {
+    const snap = await db.collection('users_private').doc(uid).get();
+    if (!snap.exists) return 1;
+    const xp = snap.data().xp || 0;
+    return calcLevelSrv(xp);
+  } catch(e) {
+    return 1;
+  }
+}
+
+// Повертає training-bot skill за рівнем гравця:
+//   LVL 1-3   → 0.45 (значно слабші)
+//   LVL 4-10  → 0.65 (трохи сильніші)
+//   LVL 11-16 → 0.82 (ще сильніші)
+//   LVL 17-20 → 1.00 (теперішній рівень)
+function getTrainingBotSkill(level) {
+  if (level <= 3)  return 0.45;
+  if (level <= 10) return 0.65;
+  if (level <= 16) return 0.82;
+  return 1.00;
+}
+
+// ══════════════════════════════════════════════════════
 // FIREBASE ID TOKEN VERIFICATION
 // ══════════════════════════════════════════════════════
 // Клієнт передає idToken разом з критичними подіями (mm:join, rejoin, shop:auth).
@@ -1173,12 +1213,19 @@ function fillBots(room, isRanked = false) {
   const avgRating = realPlayers.length
     ? Math.round(realPlayers.reduce((s, p) => s + (p.rating || 500), 0) / realPlayers.length)
     : 500;
+  // Skill для training-ботів — береться з кімнати (set у mm:join)
+  // 0.45..1.00 в залежності від рівня гравця. Для не-training дефолт 1.0
+  const trainingSkill = (typeof room.trainingBotSkill === 'number') ? room.trainingBotSkill : 1.0;
   for (const s of SLOTS) {
     if (!taken.includes(s) && !disconnectedSlots.includes(s)) {
       if (isRanked) {
         room.bots[s] = makeRankedBot(avgRating);
       } else {
-        room.bots[s] = { nick: BOT_NAMES[bi++ % BOT_NAMES.length], rating: 490 + Math.floor(Math.random()*30) };
+        room.bots[s] = {
+          nick: BOT_NAMES[bi++ % BOT_NAMES.length],
+          rating: 490 + Math.floor(Math.random()*30),
+          skill: trainingSkill,
+        };
       }
     }
   }
@@ -1433,22 +1480,33 @@ function tick(room) {
       const velToWall = view==='bottom'?bestBall.vy:view==='top'?-bestBall.vy:view==='left'?-bestBall.vx:bestBall.vx;
       const distToWall = isHoriz?Math.abs(bestBall.y-wallPos):Math.abs(bestBall.x-wallPos);
       const ttr = velToWall > 0.1 ? distToWall/velToWall : 30;
+      // skill 0.45..1.00 — впливає на jitter/speed/реакцію (тільки training-боти)
+      // skill 1.0 = поточна сила; skill < 1.0 = слабші боти
+      const skill = (bot.isRankedBot) ? 1.0 : (typeof bot.skill === 'number' ? bot.skill : 1.0);
+      // Передбачення тоже скейлиться: слабкіші боти гірше передбачають траєкторію
+      const predictFactor = 0.3 + 0.5 * skill; // 0.525..0.8
       const predictedPerp = isHoriz
-        ? (bestBall.x + bestBall.vx * Math.min(ttr, 16) * 0.8)
-        : (bestBall.y + bestBall.vy * Math.min(ttr, 16) * 0.8);
-      const jitter = (Math.random()-0.5) * (bot.isRankedBot ? 5 : 8);
+        ? (bestBall.x + bestBall.vx * Math.min(ttr, 16) * predictFactor)
+        : (bestBall.y + bestBall.vy * Math.min(ttr, 16) * predictFactor);
+      // Jitter: weaker bots — more random offset (8/skill = 8 при 1.0, ~17 при 0.45)
+      const baseJitter = bot.isRankedBot ? 5 : 8;
+      const jitterAmt = bot.isRankedBot ? baseJitter : (baseJitter / Math.max(0.4, skill));
+      const jitter = (Math.random()-0.5) * jitterAmt;
       const target = Math.max(mn, Math.min(mx, predictedPerp + jitter));
 
-      // Швидкість: ranked боти використовують свою ракетку
+      // Швидкість: ranked боти використовують свою ракетку. Training — 3.5×skill
       const botBaseSpd = PADDLE_SPD_SRV[bot.paddleId] || 3.375;
       const botMult = 0.9 + (bot.avgUpgrade||30)/100*0.3;
-      const botSpd = bot.isRankedBot ? Math.min(SMAX, botBaseSpd*botMult) : 3.5;
+      const botSpd = bot.isRankedBot ? Math.min(SMAX, botBaseSpd*botMult) : (3.5 * skill);
 
-      gs.botTargets[s] += (target - gs.botTargets[s]) * (bot.isRankedBot ? 0.16 : 0.08);
+      // Реакція: коефіцієнт інтерполяції до target — нижчий = повільніша реакція
+      const reactCoef = bot.isRankedBot ? 0.16 : (0.08 * skill);
+      gs.botTargets[s] += (target - gs.botTargets[s]) * reactCoef;
       const diff = gs.botTargets[s] - gs.paddles[s];
       if (Math.abs(diff) > 1) gs.paddles[s] = Math.max(mn, Math.min(mx, gs.paddles[s] + Math.sign(diff)*Math.min(botSpd, Math.abs(diff))));
 
       // Силове поле: активуємо коли м'яч реально летить до нас і потрапить в радіус
+      // Слабкіші training-боти рідше використовують поле (skill пропускає активацію)
       if (!gs.fields[s].active && gs.energy[s] >= EPU && velToWall > 0.1 && distToWall > 0) {
         const ticksToArrive = distToWall / velToWall;
         if (ticksToArrive >= 5 && ticksToArrive <= 30) {
@@ -1456,7 +1514,10 @@ function tick(room) {
             ? (bestBall.x + bestBall.vx * ticksToArrive)
             : (bestBall.y + bestBall.vy * ticksToArrive);
           const botFR = bot.isRankedBot ? Math.round(FR * (0.9 + (bot.avgUpgrade||30)/100*0.3)) : FR;
-          if (Math.abs(predictedHit - gs.paddles[s]) < botFR + BR + 4) {
+          // Training-боти зі skill < 1 інколи не активують поле (рандомний скіп)
+          const skipFieldChance = bot.isRankedBot ? 0 : (1 - skill);
+          const willSkipField = skipFieldChance > 0 && Math.random() < skipFieldChance * 0.6;
+          if (!willSkipField && Math.abs(predictedHit - gs.paddles[s]) < botFR + BR + 4) {
             gs.fields[s].active = true; gs.fields[s].t = 0; gs.fields[s].maxR = botFR;
             gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
           }
@@ -2093,11 +2154,17 @@ io.on('connection', (socket) => {
     // Якщо db відсутній — використовуємо дефолтні значення.
     const serverStats = await loadValidatedPaddleStats(realUid);
     const serverRating = realUid ? await loadValidatedRating(realUid) : (rating|0) || 500;
+    // Для training mode також завантажуємо рівень — щоб налаштувати силу ботів
+    const userLevel = trainingMode ? await loadUserLevel(realUid) : 1;
+    const trainingBotSkill = trainingMode ? getTrainingBotSkill(userLevel) : 1.0;
     // Якщо клієнт встиг disconnect поки ми читали Firestore — нічого не робимо
     if (!socket.connected) return;
 
     if(trainingMode){
       const tRoom = createRoom('training_'+socket.id);
+      // Зберігаємо skill для ботів цієї кімнати
+      tRoom.trainingBotSkill = trainingBotSkill;
+      tRoom.trainingPlayerLevel = userLevel;
       rooms.set(tRoom.id, tRoom);
       myRoom = tRoom; mySlot = 0;
       setSlotPlayer(tRoom, socket.id, { slot:0, nick, rating: serverRating, uid: realUid, wins:wins||0, games:games||0, input:{},
@@ -2105,6 +2172,7 @@ io.on('connection', (socket) => {
       socket.join(tRoom.id);
       socket.emit('mm:joined',{mySlot:0,roomId:tRoom.id});
       socket.emit('myslot',{mySlot:0,roomId:tRoom.id});
+      console.log(`[training] ${nick} (lvl ${userLevel}) → bot skill ${trainingBotSkill.toFixed(2)}`);
       startGame(tRoom);
       return;
     }
