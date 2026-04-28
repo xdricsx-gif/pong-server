@@ -525,14 +525,15 @@ async function loadUserLevel(uid) {
 }
 
 // Повертає training-bot skill за рівнем гравця:
-//   LVL 1-3   → 0.45 (значно слабші)
-//   LVL 4-10  → 0.65 (трохи сильніші)
-//   LVL 11-16 → 0.82 (ще сильніші)
-//   LVL 17-20 → 1.00 (теперішній рівень)
+//   LVL 1-3   → 0.225 (екстра слабкі — для нових гравців)
+//   LVL 4-10  → 0.325 (слабкі)
+//   LVL 11-16 → 0.41  (середні)
+//   LVL 17-20 → 1.00  (теперішній рівень — без змін)
+// Боти 17+ залишаються як зараз, всі інші — у 2× слабші ніж попередня калібровка.
 function getTrainingBotSkill(level) {
-  if (level <= 3)  return 0.45;
-  if (level <= 10) return 0.65;
-  if (level <= 16) return 0.82;
+  if (level <= 3)  return 0.225;
+  if (level <= 10) return 0.325;
+  if (level <= 16) return 0.41;
   return 1.00;
 }
 
@@ -1484,22 +1485,25 @@ function tick(room) {
       // skill 1.0 = поточна сила; skill < 1.0 = слабші боти
       const skill = (bot.isRankedBot) ? 1.0 : (typeof bot.skill === 'number' ? bot.skill : 1.0);
       // Передбачення тоже скейлиться: слабкіші боти гірше передбачають траєкторію
-      const predictFactor = 0.3 + 0.5 * skill; // 0.525..0.8
+      const predictFactor = 0.3 + 0.5 * skill; // 0.41..0.8 (ще норм передбачення)
       const predictedPerp = isHoriz
         ? (bestBall.x + bestBall.vx * Math.min(ttr, 16) * predictFactor)
         : (bestBall.y + bestBall.vy * Math.min(ttr, 16) * predictFactor);
-      // Jitter: weaker bots — more random offset (8/skill = 8 при 1.0, ~17 при 0.45)
+      // Jitter: weaker bots — significantly more random offset
+      // skill 1.00 → 8px; skill 0.41 → ~20px; skill 0.225 → ~36px (дуже мажуть)
       const baseJitter = bot.isRankedBot ? 5 : 8;
-      const jitterAmt = bot.isRankedBot ? baseJitter : (baseJitter / Math.max(0.4, skill));
+      const jitterAmt = bot.isRankedBot ? baseJitter : (baseJitter / Math.max(0.2, skill));
       const jitter = (Math.random()-0.5) * jitterAmt;
       const target = Math.max(mn, Math.min(mx, predictedPerp + jitter));
 
       // Швидкість: ranked боти використовують свою ракетку. Training — 3.5×skill
+      // Мінімальна швидкість 0.7 щоб бот хоча б рухався (інакше при 0.225 → 0.79 — норм)
       const botBaseSpd = PADDLE_SPD_SRV[bot.paddleId] || 3.375;
       const botMult = 0.9 + (bot.avgUpgrade||30)/100*0.3;
-      const botSpd = bot.isRankedBot ? Math.min(SMAX, botBaseSpd*botMult) : (3.5 * skill);
+      const botSpd = bot.isRankedBot ? Math.min(SMAX, botBaseSpd*botMult) : Math.max(0.7, 3.5 * skill);
 
       // Реакція: коефіцієнт інтерполяції до target — нижчий = повільніша реакція
+      // skill 0.225 → 0.018 — дуже млява реакція; skill 1.0 → 0.08 (як зараз)
       const reactCoef = bot.isRankedBot ? 0.16 : (0.08 * skill);
       gs.botTargets[s] += (target - gs.botTargets[s]) * reactCoef;
       const diff = gs.botTargets[s] - gs.paddles[s];
