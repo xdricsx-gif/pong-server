@@ -296,6 +296,42 @@ function getHangarSubSrv(hangar){
   return Math.min(MAX_SUB_SRV, total);
 }
 
+// Клас корабля по paddleId (синхронізовано з client getPaddleClass)
+//   ids 0-3 → E, 4-7 → D, 8-11 → C, 12-15 → B, 16-19 → A
+function getPaddleClassSrv(pid){
+  pid = pid|0;
+  if(pid<=3)  return 'E';
+  if(pid<=7)  return 'D';
+  if(pid<=11) return 'C';
+  if(pid<=15) return 'B';
+  return 'A';
+}
+
+// Множник ціни прокачки залежно від класу (A — базова, E у 15× дешевша)
+const CLASS_COST_MULT_SRV = {
+  A: 1.00,
+  B: 0.50,
+  C: 0.25,
+  D: 0.13,
+  E: 1/15,  // ≈ 0.067
+};
+
+// Повертає {cur, price} для прокачки конкретного корабля до конкретного sub'у
+function getUpgradeCostSrv(pid, nextSub){
+  if(nextSub < 1 || nextSub > MAX_SUB_SRV) return null;
+  const base = HANGAR_SUB_COSTS_SRV[nextSub];
+  if(!base) return null;
+  const cls = getPaddleClassSrv(pid);
+  const mult = CLASS_COST_MULT_SRV[cls] !== undefined ? CLASS_COST_MULT_SRV[cls] : 1.0;
+  let price = base.price * mult;
+  if(base.cur === 'silver'){
+    price = Math.max(10, Math.round(price/10)*10);
+  } else {
+    price = Math.max(1, Math.round(price));
+  }
+  return {cur: base.cur, price: price};
+}
+
 // Швидкості ракеток для розрахунку швидкості ботів
 const PADDLE_SPD_SRV = [
   3.375,3.375,4.5,3.375,3.375,3.375,3.375,3.375,4.5,3.375,
@@ -2509,8 +2545,9 @@ function registerShopHandlers(socket) {
         if (currentSub >= MAX_SUB_SRV) throw { code: 'max_sublevel' };
 
         const newSub = currentSub + 1;
-        // Cost = ціна *цільового* sub (тобто newSub)
-        const cost = HANGAR_SUB_COSTS_SRV[newSub];
+        // Cost = ціна *цільового* sub з врахуванням класу корабля
+        // (нижчі класи у рази дешевші — E у 15× дешевший за A)
+        const cost = getUpgradeCostSrv(pid, newSub);
         if (!cost) throw { code: 'invalid_sublevel' };
 
         const silver = priv.silver || 0;
@@ -2540,7 +2577,7 @@ function registerShopHandlers(socket) {
       });
       trackEvent('purchase', {
         uid: socket.uid, kind: 'hangar_sub', item: `${result.paddleId}:sub:${result.newSub}`,
-        amount: HANGAR_SUB_COSTS_SRV[result.newSub]?.price, cur: result.cur,
+        amount: getUpgradeCostSrv(result.paddleId, result.newSub)?.price, cur: result.cur,
       });
     } catch(e) {
       if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
