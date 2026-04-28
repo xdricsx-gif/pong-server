@@ -1759,6 +1759,39 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
   } catch(e) {
     console.error('[rewards] batch error:', e.message);
   }
+
+  // ── DAILY QUEST: інкрементуємо wins для гравців що зайняли 1-е місце в RANKED ──
+  // Тільки для нетренувальних матчів БЕЗ ботів (повноцінний ranked matchmaking)
+  if (!isTraining && participants.length >= 2) {
+    const botsCount = Object.keys(room.bots || {}).filter(s => room.bots[s]).length;
+    if (botsCount === 0) {
+      const todayUTC = new Date().toISOString().slice(0, 10);
+      for (const p of participants) {
+        const placeIdx = places.indexOf(p.slot);
+        if (placeIdx !== 0) continue; // тільки 1-е місце
+        // Транзакція бо потрібна обробка зміни дати (reset wins)
+        const dailyRef = db.collection('users_private').doc(p.uid).collection('dailyQuest').doc('current');
+        try {
+          await db.runTransaction(async (tx) => {
+            const snap = await tx.get(dailyRef);
+            const data = snap.exists ? snap.data() : {};
+            // Якщо дата змінилась → новий день: скидаємо wins і todayClaimed
+            const isNewDay = data.date !== todayUTC;
+            const newWins = isNewDay ? 1 : ((data.wins || 0) + 1);
+            tx.set(dailyRef, {
+              date: todayUTC,
+              wins: newWins,
+              todayClaimed: isNewDay ? false : (data.todayClaimed || false),
+              streakDay: data.streakDay || 0, // не міняємо тут, тільки при claim
+              lastClaimDate: data.lastClaimDate || null,
+            }, { merge: true });
+          });
+        } catch(e) {
+          console.error(`[dailyQuest] increment failed for ${p.uid}:`, e.message);
+        }
+      }
+    }
+  }
 }
 
 function endGame(room, winnerSlot) {
@@ -2624,6 +2657,123 @@ function registerShopHandlers(socket) {
       if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
       console.error('shop:buy_energy', e.message);
       socket.emit('shop:error', { msg: 'server_error' });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════
+  // DAILY QUEST handlers
+  // Reward за день N: silver D1=500, D2=1300, D3=1750, D4=2200, D5=3000;
+  //                   gold  D6=35,  D7=60.
+  // Цикл 7 днів — після D7 наступний successful claim повертає до D1.
+  // Streak: якщо last claim був вчора → продовжуємо, інакше → reset до D1.
+  // ═══════════════════════════════════════════════════════
+  socket.on('daily:get', async () => {
+    if (!db) return socket.emit('daily:error', { msg: 'server_unavailable' });
+    if (!socket.uid) return socket.emit('daily:error', { msg: 'auth_required' });
+    try {
+      const dailyRef = db.collection('users_private').doc(socket.uid).collection('dailyQuest').doc('current');
+      const snap = await dailyRef.get();
+      const data = snap.exists ? snap.data() : {};
+      const todayUTC = new Date().toISOString().slice(0, 10);
+      // Якщо дата відрізняється — на read скидаємо wins; (запис відбудеться при наступній грі/claim)
+      const isNewDay = data.date !== todayUTC;
+      socket.emit('daily:state', {
+        date: todayUTC,
+        wins: isNewDay ? 0 : (data.wins || 0),
+        todayClaimed: isNewDay ? false : !!data.todayClaimed,
+        streakDay: data.streakDay || 0, // 0 = ніколи не клеймили
+        lastClaimDate: data.lastClaimDate || null,
+        winsRequired: 3, // потрібно 3 перших місця
+      });
+    } catch(e) {
+      console.error('daily:get', e.message);
+      socket.emit('daily:error', { msg: 'server_error' });
+    }
+  });
+
+  socket.on('daily:claim', async () => {
+    if (!db) return socket.emit('daily:error', { msg: 'server_unavailable' });
+    if (!socket.uid) return socket.emit('daily:error', { msg: 'auth_required' });
+
+    const DAILY_REWARDS = [
+      { day: 1, cur: 'silver', amount: 500 },
+      { day: 2, cur: 'silver', amount: 1300 },
+      { day: 3, cur: 'silver', amount: 1750 },
+      { day: 4, cur: 'silver', amount: 2200 },
+      { day: 5, cur: 'silver', amount: 3000 },
+      { day: 6, cur: 'gold',   amount: 35  },
+      { day: 7, cur: 'gold',   amount: 60  },
+    ];
+
+    try {
+      const dailyRef = db.collection('users_private').doc(socket.uid).collection('dailyQuest').doc('current');
+      const privRef  = db.collection('users_private').doc(socket.uid);
+      const todayUTC = new Date().toISOString().slice(0, 10);
+
+      const result = await db.runTransaction(async (tx) => {
+        const dailySnap = await tx.get(dailyRef);
+        const privSnap  = await tx.get(privRef);
+        if (!privSnap.exists) throw { code: 'user_not_found' };
+        const data = dailySnap.exists ? dailySnap.data() : {};
+        const priv = privSnap.data();
+
+        // Перевіряємо чи виконано умову (3 перші місця сьогодні)
+        const isTodayData = data.date === todayUTC;
+        const wins = isTodayData ? (data.wins || 0) : 0;
+        if (wins < 3) throw { code: 'not_enough_wins' };
+        if (isTodayData && data.todayClaimed) throw { code: 'already_claimed' };
+
+        // Визначаємо який день у streak (1-7)
+        // Якщо lastClaimDate === вчора → продовжуємо streak (день+1, циклічно 1-7)
+        // Інакше → починаємо з 1
+        const yesterdayUTC = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+        const prevStreakDay = data.streakDay || 0;
+        let newStreakDay;
+        if (data.lastClaimDate === yesterdayUTC && prevStreakDay >= 1 && prevStreakDay < 7) {
+          newStreakDay = prevStreakDay + 1;
+        } else if (data.lastClaimDate === yesterdayUTC && prevStreakDay === 7) {
+          newStreakDay = 1; // після day 7 цикл починається спочатку
+        } else {
+          newStreakDay = 1; // streak порушено або вперше
+        }
+
+        // Знаходимо нагороду
+        const reward = DAILY_REWARDS.find(r => r.day === newStreakDay);
+        if (!reward) throw { code: 'invalid_day' };
+
+        // Інкрементуємо валюту
+        const cur = reward.cur;
+        const updPriv = {};
+        if (cur === 'silver') updPriv.silver = (priv.silver || 0) + reward.amount;
+        if (cur === 'gold')   updPriv.gold   = (priv.gold   || 0) + reward.amount;
+        tx.update(privRef, updPriv);
+
+        // Оновлюємо dailyQuest стан
+        tx.set(dailyRef, {
+          date: todayUTC,
+          wins: wins,
+          todayClaimed: true,
+          streakDay: newStreakDay,
+          lastClaimDate: todayUTC,
+        }, { merge: true });
+
+        return {
+          claimedDay: newStreakDay,
+          cur, amount: reward.amount,
+          newSilver: cur === 'silver' ? updPriv.silver : (priv.silver || 0),
+          newGold:   cur === 'gold'   ? updPriv.gold   : (priv.gold   || 0),
+        };
+      });
+
+      socket.emit('daily:claimed', result);
+      trackEvent('purchase', {
+        uid: socket.uid, kind: 'daily_reward', item: `day_${result.claimedDay}`,
+        amount: -result.amount, cur: result.cur, // негативний бо це gain
+      });
+    } catch(e) {
+      if (e && e.code) { socket.emit('daily:error', { msg: e.code }); return; }
+      console.error('daily:claim', e.message);
+      socket.emit('daily:error', { msg: 'server_error' });
     }
   });
 }
