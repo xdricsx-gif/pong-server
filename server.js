@@ -1550,6 +1550,8 @@ function tick(room) {
           // Округлення після відбиття від ракетки
           ball.x=Math.round(ball.x*10)/10;ball.y=Math.round(ball.y*10)/10;
           ball.vx=Math.round(ball.vx*10)/10;ball.vy=Math.round(ball.vy*10)/10;
+          // Емітимо event для клієнтського SFX. Speed — швидкість м'яча для pitch варіації
+          io.to(room.id).emit('paddle:hit', { slot: s, speed: Math.round(speed*10)/10 });
           hit = true; break;
         }
       }
