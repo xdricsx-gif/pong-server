@@ -250,39 +250,41 @@ const HANGAR_COSTS_SRV = [
 
 // ═══════════════════════════════════════════════════════
 // ── LINEAR SUBLEVEL SYSTEM (server) ──
-// 5 levels × 10 sublevels = 50 послідовних апгрейдів
+// 4 levels × 10 sublevels = 40 послідовних апгрейдів
 // HANGAR_SUB_COSTS_SRV[i] = ціна купівлі sub'у i (для переходу sub=i-1 → i)
-// Лінійна прогресія цін: дешеві ранні, дорогі пізні (gold для L4-L5)
+// Лінійна прогресія цін: дешеві ранні, дорогі пізні (gold для L4)
+// HISTORICAL: раніше 5 рівнів × 10 = 50. Найслабший L1=НОВАЧОК видалено,
+// залишилось 4 рівні з нумерацією L1..L4 (=stat'и старих L2..L5).
 // ═══════════════════════════════════════════════════════
-const MAX_SUB_SRV = 50;
+const MAX_SUB_SRV = 40;
 const HANGAR_SUB_COSTS_SRV = (function(){
   const arr = [null];
-  for(let i=1; i<=50; i++){
+  for(let i=1; i<=40; i++){
     if(i<=10){
-      arr.push({cur:'silver', price: 1500 + (i-1)*800});      // 1500..8700 silver (L1)
+      arr.push({cur:'silver', price: 1500 + (i-1)*800});      // 1500..8700 silver (L1=пілот)
     } else if(i<=20){
-      arr.push({cur:'silver', price: 12000 + (i-11)*2000});   // 12000..30000 silver (L2)
+      arr.push({cur:'silver', price: 12000 + (i-11)*2000});   // 12000..30000 silver (L2=ветеран)
     } else if(i<=30){
-      arr.push({cur:'silver', price: 35000 + (i-21)*3500});   // 35000..66500 silver (L3)
-    } else if(i<=40){
-      arr.push({cur:'gold', price: 100 + (i-31)*20});         // 100..280 gold (L4)
+      arr.push({cur:'silver', price: 35000 + (i-21)*3500});   // 35000..66500 silver (L3=еліта)
     } else {
-      arr.push({cur:'gold', price: 320 + (i-41)*55});         // 320..815 gold (L5)
+      arr.push({cur:'gold', price: 100 + (i-31)*20});         // 100..280 gold (L4=легенда)
     }
   }
   return arr;
 })();
 
-// Множник на основі рівня — L1=1.00, L2=1.06, L3=1.13, L4=1.21, L5=1.30
+// Множник на основі рівня — L1=1.06, L2=1.13, L3=1.21, L4=1.30
+// Старий L1=1.00 видалено; кожен рівень тепер відповідає старому L+1.
 function getLevelMultSrv(level){
-  return [1.00, 1.00, 1.06, 1.13, 1.21, 1.30][level] || 1.00;
+  return [1.00, 1.06, 1.13, 1.21, 1.30][level] || 1.06;
 }
 
 // Переводимо sub → {level, sublevel}
+// 4-рівнева система: sub 0..40, level 1..4, sublevel 0..10
 function subToLevelSrv(sub){
   sub = Math.max(0, Math.min(MAX_SUB_SRV, sub|0));
-  const level = Math.min(5, Math.floor(sub/10) + 1);
-  const sublevel = (level === 5) ? Math.min(10, sub - 40) : (sub % 10);
+  const level = Math.min(4, Math.floor(sub/10) + 1);
+  const sublevel = (level === 4) ? Math.min(10, sub - 30) : (sub % 10);
   return {level, sublevel};
 }
 
