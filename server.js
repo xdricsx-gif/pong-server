@@ -1763,39 +1763,8 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
   } catch(e) {
     console.error('[rewards] batch error:', e.message);
   }
-
-  // ── DAILY QUEST: інкрементуємо wins для гравців що зайняли 1-е місце в RANKED ──
-  // Тільки для нетренувальних матчів БЕЗ ботів (повноцінний ranked matchmaking)
-  if (!isTraining && participants.length >= 2) {
-    const botsCount = Object.keys(room.bots || {}).filter(s => room.bots[s]).length;
-    if (botsCount === 0) {
-      const todayUTC = new Date().toISOString().slice(0, 10);
-      for (const p of participants) {
-        const placeIdx = places.indexOf(p.slot);
-        if (placeIdx !== 0) continue; // тільки 1-е місце
-        // Транзакція бо потрібна обробка зміни дати (reset wins)
-        const dailyRef = db.collection('users_private').doc(p.uid).collection('dailyQuest').doc('current');
-        try {
-          await db.runTransaction(async (tx) => {
-            const snap = await tx.get(dailyRef);
-            const data = snap.exists ? snap.data() : {};
-            // Якщо дата змінилась → новий день: скидаємо wins і todayClaimed
-            const isNewDay = data.date !== todayUTC;
-            const newWins = isNewDay ? 1 : ((data.wins || 0) + 1);
-            tx.set(dailyRef, {
-              date: todayUTC,
-              wins: newWins,
-              todayClaimed: isNewDay ? false : (data.todayClaimed || false),
-              streakDay: data.streakDay || 0, // не міняємо тут, тільки при claim
-              lastClaimDate: data.lastClaimDate || null,
-            }, { merge: true });
-          });
-        } catch(e) {
-          console.error(`[dailyQuest] increment failed for ${p.uid}:`, e.message);
-        }
-      }
-    }
-  }
+  // NOTE: щоденна нагорода більше не потребує умов — просто увійти в гру.
+  // Прогрес фіксується при кожному відкритті daily quest screen (через `daily:get`).
 }
 
 function endGame(room, winnerSlot) {
@@ -2681,15 +2650,13 @@ function registerShopHandlers(socket) {
       const snap = await dailyRef.get();
       const data = snap.exists ? snap.data() : {};
       const todayUTC = new Date().toISOString().slice(0, 10);
-      // Якщо дата відрізняється — на read скидаємо wins; (запис відбудеться при наступній грі/claim)
-      const isNewDay = data.date !== todayUTC;
+      // Чи був claim сьогодні
+      const todayClaimed = (data.lastClaimDate === todayUTC);
       socket.emit('daily:state', {
         date: todayUTC,
-        wins: isNewDay ? 0 : (data.wins || 0),
-        todayClaimed: isNewDay ? false : !!data.todayClaimed,
+        todayClaimed,
         streakDay: data.streakDay || 0, // 0 = ніколи не клеймили
         lastClaimDate: data.lastClaimDate || null,
-        winsRequired: 3, // потрібно 3 перших місця
       });
     } catch(e) {
       console.error('daily:get', e.message);
@@ -2723,11 +2690,8 @@ function registerShopHandlers(socket) {
         const data = dailySnap.exists ? dailySnap.data() : {};
         const priv = privSnap.data();
 
-        // Перевіряємо чи виконано умову (3 перші місця сьогодні)
-        const isTodayData = data.date === todayUTC;
-        const wins = isTodayData ? (data.wins || 0) : 0;
-        if (wins < 3) throw { code: 'not_enough_wins' };
-        if (isTodayData && data.todayClaimed) throw { code: 'already_claimed' };
+        // Єдина умова: ще не отримано сьогодні (вхід = достатньо)
+        if (data.lastClaimDate === todayUTC) throw { code: 'already_claimed' };
 
         // Визначаємо який день у streak (1-7)
         // Якщо lastClaimDate === вчора → продовжуємо streak (день+1, циклічно 1-7)
@@ -2757,7 +2721,6 @@ function registerShopHandlers(socket) {
         // Оновлюємо dailyQuest стан
         tx.set(dailyRef, {
           date: todayUTC,
-          wins: wins,
           todayClaimed: true,
           streakDay: newStreakDay,
           lastClaimDate: todayUTC,
