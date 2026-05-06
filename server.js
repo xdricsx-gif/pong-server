@@ -2228,7 +2228,14 @@ io.on('connection', (socket) => {
   // з його timestamp. Клієнт отримує RTT + може обчислити
   // server clock offset.
   // ──────────────────────────────────────────────
+  // ──────────────────────────────────────────────
+  // PING/PONG
+  // Клієнт надсилає 'np' (network ping) кожні 2с.
+  // Сервер повертає {c, s} — клієнтський timestamp + серверний.
+  // Це дає клієнту RTT і clock offset.
+  // ──────────────────────────────────────────────
   socket.on('np', (clientT) => {
+    socket.lastPingT = Date.now(); // для серверного моніторингу
     socket.emit('np', { c: clientT, s: Date.now() });
   });
 
@@ -2300,7 +2307,18 @@ io.on('connection', (socket) => {
   // Явний вихід з кнопки — одразу eliminates
   socket.on('leave_game', () => leave({ voluntary: true }));
   // Raw disconnect (transport close, ping timeout, закрив таб) — даємо 30с на rejoin
-  socket.on('disconnect', () => leave({ voluntary: false }));
+  socket.on('disconnect', (reason) => {
+    // Логуємо для діагностики чому клієнт disconnect'нувся.
+    // Можливі причини:
+    //   "transport close"      — мережа пропала / клієнт закрив вкладку
+    //   "transport error"      — socket помилка
+    //   "ping timeout"         — клієнт не відповів на server ping за heartbeat
+    //   "client namespace disconnect" — клієнт викликав .disconnect() (наш код)
+    //   "server namespace disconnect" — сервер викликав .disconnect()
+    const inGame = !!(myRoom && myRoom.status === 'playing');
+    console.log(`[socket] disconnect socket=${socket.id} uid=${socket.uid||'?'} reason=${reason} inGame=${inGame}`);
+    leave({ voluntary: false });
+  });
 
 
 
@@ -2404,9 +2422,21 @@ setInterval(() => {
   for (const [rid, room] of rooms) {
     if (!room.game || room.game.gameOver) continue;
     const gs = room.game;
-    const players = Object.values(room.players).map(p =>
-      `slot${p.slot}:${p.nick}(ping?)`
-    ).join(', ');
+    const now = Date.now();
+    const players = Object.values(room.players).map(p => {
+      // Отримуємо socket для цього гравця
+      const sock = io.sockets.sockets.get(p.id);
+      let pingInfo;
+      if (!sock || !sock.connected) {
+        pingInfo = 'disconnected';
+      } else if (sock.lastPingT) {
+        const age = ((now - sock.lastPingT) / 1000).toFixed(1);
+        pingInfo = `lastPing=${age}s`;
+      } else {
+        pingInfo = 'no-ping';
+      }
+      return `slot${p.slot}:${p.nick}(${pingInfo})`;
+    }).join(', ');
     const balls = gs.balls.map(b =>
       `[${b.x.toFixed(0)},${b.y.toFixed(0)} v:${b.vx.toFixed(2)},${b.vy.toFixed(2)}]`
     ).join(' ');
