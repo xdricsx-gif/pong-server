@@ -23,7 +23,30 @@ async function initPostgres() {
     return;
   }
   try {
-    pgPool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+    pgPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+      // Connection pool tuning — Railway PG може закривати idle connection
+      max: 10,                              // макс concurrent connections
+      idleTimeoutMillis: 30000,             // закривати idle через 30с (нормально)
+      connectionTimeoutMillis: 5000,        // 5с на встановлення
+    });
+
+    // ── КРИТИЧНО: pool.on('error') ──
+    // Без цього handler'а будь-яка idle-connection помилка тригерить uncaughtException
+    // → графefulShutdown → crash гри. Тепер перехоплюємо тут і пробуємо reconnect.
+    pgPool.on('error', (err, client) => {
+      console.error('[Analytics] PostgreSQL idle connection error (handled):', err.message);
+      // Не падаємо — пул сам спробує перепідключитись на наступному запиті
+    });
+
+    // Окремий handler для конкретних client помилок під час query
+    pgPool.on('connect', (client) => {
+      client.on('error', (err) => {
+        console.error('[Analytics] PostgreSQL client error (handled):', err.message);
+      });
+    });
+
     await pgPool.query(`
       CREATE TABLE IF NOT EXISTS players (
         uid TEXT PRIMARY KEY,
@@ -2932,13 +2955,31 @@ async function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 
-// Fatal errors — логуємо і намагаємось shutdown, не крашимо тихо
+// Fatal errors — логуємо і намагаємось shutdown, не крашимо тихо.
+// АЛЕ: помилки з PostgreSQL (analytics) — НЕ КРИТИЧНІ для гри. Гра має продовжити
+// працювати навіть якщо PG відвалиться. Інакше один проблемний idle connection
+// в analytics вбиває всіх гравців онлайн.
 process.on('uncaughtException', (err) => {
-  console.error('[fatal] uncaughtException:', err.stack || err);
+  const msg = (err && err.message) || String(err);
+  const stack = (err && err.stack) || '';
+  // Перевіряємо чи це PG-related помилка (idle connection terminated, ECONNRESET to PG, etc.)
+  const isPgError = (
+    msg.includes('Connection terminated') ||
+    msg.includes('Connection ended') ||
+    stack.includes('node_modules/pg/') ||
+    stack.includes('/pg/lib/')
+  );
+  if (isPgError) {
+    console.error('[handled] PostgreSQL connection error (game continues):', msg);
+    // Не shutdown — analytics не критичний. Pool сам перевідновиться.
+    return;
+  }
+  // Реальна фатальна помилка — shutdown
+  console.error('[fatal] uncaughtException:', stack || err);
   gracefulShutdown('uncaughtException');
 });
 process.on('unhandledRejection', (reason) => {
-  console.error('[fatal] unhandledRejection:', reason);
-  // Не кидаємо shutdown для unhandledRejection — тільки логуємо,
-  // бо часто це некритичні Firebase/Firestore помилки.
+  const msg = (reason && reason.message) || String(reason);
+  console.error('[handled] unhandledRejection:', msg);
+  // Не кидаємо shutdown — часто це некритичні Firebase/Firestore/PG помилки.
 });
