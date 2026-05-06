@@ -2644,7 +2644,8 @@ function registerShopHandlers(socket) {
   // ═══════════════════════════════════════════════════════
   socket.on('daily:get', async () => {
     if (!db) return socket.emit('daily:error', { msg: 'server_unavailable' });
-    if (!socket.uid) return socket.emit('daily:error', { msg: 'auth_required' });
+    // Якщо auth ще не пройшов — мовчки ігноруємо (клієнт перезапитає після shop:auth)
+    if (!socket.uid) return;
     try {
       const dailyRef = db.collection('users_private').doc(socket.uid).collection('dailyQuest').doc('current');
       const snap = await dailyRef.get();
