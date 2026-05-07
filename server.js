@@ -6,8 +6,14 @@ const { Pool } = require('pg');
 const httpServer = createServer();
 const io = new Server(httpServer, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
-  pingInterval: 5000,
-  pingTimeout: 10000,
+  // ── PING/PONG TIMEOUTS ──
+  // Збільшено для стійкості до mobile network instability.
+  // 3G/4G у транспорті, тунелях, при перемиканні cells — pause до 15-20с нормальний.
+  // Раніше: pingInterval=5s, pingTimeout=10s → false-disconnect через ping timeout.
+  // Тепер: pingInterval=10s (рідші перевірки), pingTimeout=25s (терпиме до stalls).
+  // Загалом max gap клієнт→сервер = 35s до disconnect (10 + 25).
+  pingInterval: 10000,
+  pingTimeout: 25000,
 });
 
 const PORT = process.env.PORT || 3000;
