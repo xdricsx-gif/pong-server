@@ -1331,6 +1331,12 @@ function tick(room) {
           // Очистити hit-прапори: наступна активація зможе дати reflection при вході
           const _hk = 'ff_hit_' + s;
           for (const b of gs.balls) { delete b[_hk]; }
+          // ── AAA EVENT: FF деактивовано ──
+          io.to(room.id).emit('event:field', {
+            type: 'deactivate',
+            tick: gs.tick,
+            slot: s,
+          });
         }
       } else {
         const pStats2 = getSlotPlayer(room, s)?.paddleStats
@@ -1365,6 +1371,14 @@ function tick(room) {
           gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
           // Force broadcast — активація поля має одразу дійти до всіх
           gs._forceNextBroadcast = true;
+          // ── AAA EVENT: повідомляємо клієнтів про активацію FF з точним tick'ом ──
+          io.to(room.id).emit('event:field', {
+            type: 'activate',
+            tick: gs.tick,
+            slot: s,
+            paddleX: gs.paddles[s],
+            maxR: gs.fields[s].maxR,
+          });
 
           // Client-authoritative boost position:
           // Якщо клієнт надіслав позицію при активації — перевіряємо чи надійна
@@ -1490,6 +1504,14 @@ function tick(room) {
           if (Math.abs(predictedHit - gs.paddles[s]) < botFR + BR + 4) {
             gs.fields[s].active = true; gs.fields[s].t = 0; gs.fields[s].maxR = botFR;
             gs.energy[s] = Math.max(0, gs.energy[s] - EPU);
+            // ── AAA EVENT: бот активував FF ──
+            io.to(room.id).emit('event:field', {
+              type: 'activate',
+              tick: gs.tick,
+              slot: s,
+              paddleX: gs.paddles[s],
+              maxR: botFR,
+            });
           }
         }
       }
@@ -1498,10 +1520,18 @@ function tick(room) {
     for (let i = gs.respawns.length - 1; i >= 0; i--) {
       gs.respawns[i].timer -= TICK_MS;
       if (gs.respawns[i].timer <= 0) {
-        gs.balls.push({ x: W/2, y: H/2, vx: gs.respawns[i].vx, vy: gs.respawns[i].vy, id: Date.now()+i });
+        const newBall = { x: W/2, y: H/2, vx: gs.respawns[i].vx, vy: gs.respawns[i].vy, id: Date.now()+i };
+        gs.balls.push(newBall);
         gs.respawns.splice(i, 1);
         // Новий м'яч на полі — клієнт має одразу дізнатись
         gs._forceNextBroadcast = true;
+        // ── AAA EVENT: новий м'яч ─── клієнт додає його у свою симуляцію
+        io.to(room.id).emit('event:ball', {
+          type: 'spawn',
+          tick: gs.tick,
+          ballId: newBall.id,
+          post: { x: newBall.x, y: newBall.y, vx: newBall.vx, vy: newBall.vy },
+        });
       }
     }
 
@@ -1562,6 +1592,8 @@ function tick(room) {
         if (gs.eliminated[s]) continue;
         const p = slotToPaddle(s, gs.paddles[s], gs, room);
         if (hitRect(ball, p)) {
+          // ── PRE-EVENT STATE для клієнтської reconciliation ──
+          const preX = ball.x, preY = ball.y, preVx = ball.vx, preVy = ball.vy;
           const view = SLOT_VIEW[s];
           const speed = Math.hypot(ball.vx, ball.vy);
           let sideOffset;
@@ -1581,7 +1613,19 @@ function tick(room) {
           // Округлення після відбиття від ракетки
           ball.x=Math.round(ball.x*10)/10;ball.y=Math.round(ball.y*10)/10;
           ball.vx=Math.round(ball.vx*10)/10;ball.vy=Math.round(ball.vy*10)/10;
-          // Емітимо event для клієнтського SFX. Speed — швидкість м'яча для pitch варіації
+          // ── AAA EVENT для клієнтської reconciliation ──
+          // Клієнт використовує pre/post щоб точно відтворити подію
+          // в своїй симуляції. tick = коли подія сталася на сервері.
+          io.to(room.id).emit('event:ball', {
+            type: 'paddle_hit',
+            tick: gs.tick,
+            ballId: ball.id,
+            slot: s,
+            speed: Math.round(speed*10)/10,
+            pre:  { x: preX, y: preY, vx: preVx, vy: preVy },
+            post: { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy },
+          });
+          // Backward-compat: legacy paddle:hit event (для звуку — клієнт вже має listener)
           io.to(room.id).emit('paddle:hit', { slot: s, speed: Math.round(speed*10)/10 });
           hit = true; break;
         }
@@ -1597,25 +1641,37 @@ function tick(room) {
           ball.y = BR;
           applyEliminatedWall(gs, 1, ball);
         }
-        else { if (!goal(1)) spawnBallQueued(gs); gs.balls.splice(bi,1); }
+        else {
+          io.to(room.id).emit('event:ball', { type: 'remove', tick: gs.tick, ballId: ball.id, scoredSlot: 1 });
+          if (!goal(1)) spawnBallQueued(gs); gs.balls.splice(bi,1);
+        }
       } else if (by+BR > H && bx2 > C && bx2 < W-C) {
         if (gs.eliminated[0]) {
           ball.y = H - BR;
           applyEliminatedWall(gs, 0, ball);
         }
-        else { if (!goal(0)) spawnBallQueued(gs); gs.balls.splice(bi,1); }
+        else {
+          io.to(room.id).emit('event:ball', { type: 'remove', tick: gs.tick, ballId: ball.id, scoredSlot: 0 });
+          if (!goal(0)) spawnBallQueued(gs); gs.balls.splice(bi,1);
+        }
       } else if (bx2-BR < 0 && by > C && by < H-C) {
         if (gs.eliminated[2]) {
           ball.x = BR;
           applyEliminatedWall(gs, 2, ball);
         }
-        else { if (!goal(2)) spawnBallQueued(gs); gs.balls.splice(bi,1); }
+        else {
+          io.to(room.id).emit('event:ball', { type: 'remove', tick: gs.tick, ballId: ball.id, scoredSlot: 2 });
+          if (!goal(2)) spawnBallQueued(gs); gs.balls.splice(bi,1);
+        }
       } else if (bx2+BR > W && by > C && by < H-C) {
         if (gs.eliminated[3]) {
           ball.x = W - BR;
           applyEliminatedWall(gs, 3, ball);
         }
-        else { if (!goal(3)) spawnBallQueued(gs); gs.balls.splice(bi,1); }
+        else {
+          io.to(room.id).emit('event:ball', { type: 'remove', tick: gs.tick, ballId: ball.id, scoredSlot: 3 });
+          if (!goal(3)) spawnBallQueued(gs); gs.balls.splice(bi,1);
+        }
       }
       } // end if (!isHeldAny) для paddle/goal блоків
       if (gs.gameOver) { broadcastState(room); return; }
