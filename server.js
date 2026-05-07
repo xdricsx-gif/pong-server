@@ -705,13 +705,25 @@ function resolveChamfersBall(ball) {
   }
 }
 
-function clampBallObj(ball) {
+function clampBallObj(ball, room, gs) {
   for(const s of CS){
     const d=(ball.x-s.ax)*s.nx+(ball.y-s.ay)*s.ny;
     if(d<-BR){
+      // ── PRE-EVENT для клієнтської reconciliation ──
+      const preX = ball.x, preY = ball.y, preVx = ball.vx, preVy = ball.vy;
       const dv=ball.vx*s.nx+ball.vy*s.ny;ball.vx-=2*dv*s.nx;ball.vy-=2*dv*s.ny;
       const{cx,cy}=cPt(ball.x,ball.y,s.ax,s.ay,s.bx,s.by);
       ball.x=cx+s.nx*(BR+1);ball.y=cy+s.ny*(BR+1);
+      // ── AAA EVENT: chamfer (corner) bounce ──
+      if (room && gs && typeof io !== 'undefined') {
+        io.to(room.id).emit('event:ball', {
+          type: 'chamfer_bounce',
+          tick: gs.tick,
+          ballId: ball.id,
+          pre:  { x: preX, y: preY, vx: preVx, vy: preVy },
+          post: { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy },
+        });
+      }
     }
   }
 }
@@ -766,7 +778,9 @@ const ELIM_WALL_RANDOM_DEG  = 25;    // ±25° випадкового відхи
 const ELIM_WALL_MIN_SP      = 3.5;   // мінімальна швидкість після відскоку
 const ELIM_WALL_MAX_SP      = 6.5;   // максимальна (clamp)
 
-function applyEliminatedWall(gs, slot, ball) {
+function applyEliminatedWall(gs, slot, ball, room) {
+  // ── PRE-EVENT STATE ──
+  const preX = ball.x, preY = ball.y, preVx = ball.vx, preVy = ball.vy;
   // slot: 0=bottom, 1=top, 2=left, 3=right
   // Нормаль "у центр поля" від воріт
   let nx, ny;
@@ -815,9 +829,20 @@ function applyEliminatedWall(gs, slot, ball) {
 
   ball.vx = reflVx;
   ball.vy = reflVy;
+  // ── AAA EVENT: elim wall bounce (non-deterministic через Math.random) ──
+  if (room) {
+    io.to(room.id).emit('event:ball', {
+      type: 'elim_wall_bounce',
+      tick: gs.tick,
+      ballId: ball.id,
+      slot,
+      pre:  { x: preX, y: preY, vx: preVx, vy: preVy },
+      post: { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy },
+    });
+  }
 }
 
-function applyFFBall(gs, s, ball) {
+function applyFFBall(gs, s, ball, room) {
   const f = gs.fields[s];
   if (!f || !f.active) return false;
 
@@ -862,6 +887,8 @@ function applyFFBall(gs, s, ball) {
   const justEntered = oldDist > collideR && dist <= collideR && !ball[_hitKey];
 
   if (justEntered) {
+    // ── PRE-EVENT STATE для клієнтської reconciliation ──
+    const preX = ball.x, preY = ball.y, preVx = ball.vx, preVy = ball.vy;
     // CCD — точка перетину межі
     let hitX = ball.x, hitY = ball.y;
     const a = ball.vx*ball.vx + ball.vy*ball.vy;
@@ -898,6 +925,17 @@ function applyFFBall(gs, s, ball) {
     ball.x = hitX + nx * 2;
     ball.y = hitY + ny * 2;
     ball[_hitKey] = true;
+    // ── AAA EVENT: FF reflect (discrete first-contact reflection) ──
+    if (room) {
+      io.to(room.id).emit('event:ball', {
+        type: 'field_reflect',
+        tick: gs.tick,
+        ballId: ball.id,
+        slot: s,
+        pre:  { x: preX, y: preY, vx: preVx, vy: preVy },
+        post: { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy },
+      });
+    }
   } else {
     // ── CONTINUOUS PULSE: м'яч у полі — щотіку отримує імпульс назовні ──
     // Глибина проникнення (0 на межі, 1 у центрі)
@@ -913,7 +951,18 @@ function applyFFBall(gs, s, ball) {
 
   // ── Коли м'яч вийшов — скидаємо прапор "вже був ударений" ──
   // (щоб наступний вхід знову дав reflection, якщо поле ще активне)
+  // Також: emit event щоб клієнт міг синхронізуватись після continuous pulse drift
   if (dist > collideR + 2) {
+    if (ball[_hitKey] && room) {
+      // Щойно вийшов з зони collision — clean state для клієнта
+      io.to(room.id).emit('event:ball', {
+        type: 'field_exit',
+        tick: gs.tick,
+        ballId: ball.id,
+        slot: s,
+        post: { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy },
+      });
+    }
     ball[_hitKey] = false;
   }
 
@@ -972,7 +1021,7 @@ function isBallInMagnet(gs, s, ball) {
 // При release використовуємо збережений offset для визначення кута вильоту.
 const MAG_CAPTURE_RADIUS = 55;  // м'яч захоплюється коли в цьому радіусі
 const MAG_ENTRY_DAMPING  = 0.6; // як швидко м'яч "осаджується" у offset після захоплення
-function applyMagnetBall(gs, s, ball) {
+function applyMagnetBall(gs, s, ball, room) {
   if (!gs.magnet[s]) return false;
 
   const p = slotToPaddle(s, gs.paddles[s], gs, null);
@@ -994,7 +1043,7 @@ function applyMagnetBall(gs, s, ball) {
     // (щоб м'яч не зависав з vx=vy=0 коли magnet його "випустив")
     if (ball['mag_held_' + s]) {
       console.log(`[MAG-LOSE] slot=${s} ball=${String(ball.id).slice(-4)} dist=${dist.toFixed(0)} (>83) pad=${Math.round(gs.paddles[s])}`);
-      releaseMagnetBall(gs, s, ball, 0);
+      releaseMagnetBall(gs, s, ball, 0, room);
     }
     delete ball['_magInZone_' + s];
     return false;
@@ -1007,7 +1056,7 @@ function applyMagnetBall(gs, s, ball) {
     // Якщо ВЖЕ був схоплений, але потрапив позаду — release (щоб не зависнув)
     if (ball['mag_held_' + s]) {
       console.log(`[MAG-BEHIND] slot=${s} ball=${String(ball.id).slice(-4)} ball=(${ball.x.toFixed(0)},${ball.y.toFixed(0)}) pad=${Math.round(gs.paddles[s])} fc=(${fcx.toFixed(0)},${fcy.toFixed(0)}) frontDot=${frontDot.toFixed(1)}`);
-      releaseMagnetBall(gs, s, ball, 0);
+      releaseMagnetBall(gs, s, ball, 0, room);
     }
     return false;
   }
@@ -1024,6 +1073,8 @@ function applyMagnetBall(gs, s, ball) {
     const toD = Math.hypot(toX, toY);
 
     if (toD < MAG_CAPTURE_RADIUS) {
+      // ── PRE-EVENT STATE ──
+      const preX = ball.x, preY = ball.y, preVx = ball.vx, preVy = ball.vy;
       // Захоплюємо
       ball[heldKey] = true;
       ball[offKey_X] = ball.x - fcx;
@@ -1032,6 +1083,18 @@ function applyMagnetBall(gs, s, ball) {
       ball.vy = 0;
       delete ball['_magInZone_' + s];
       console.log(`[MAG-CAPTURE] slot=${s} ball=${String(ball.id).slice(-4)} off=(${ball[offKey_X].toFixed(1)},${ball[offKey_Y].toFixed(1)}) pad=${Math.round(gs.paddles[s])} fc=(${fcx.toFixed(0)},${fcy.toFixed(0)})`);
+      // ── AAA EVENT: magnet capture ──
+      if (room) {
+        io.to(room.id).emit('event:ball', {
+          type: 'magnet_capture',
+          tick: gs.tick,
+          ballId: ball.id,
+          slot: s,
+          pre:  { x: preX, y: preY, vx: preVx, vy: preVy },
+          post: { x: ball.x, y: ball.y, vx: 0, vy: 0 },
+          offX: ball[offKey_X], offY: ball[offKey_Y],
+        });
+      }
     } else {
       // Тягнемо — тільки додаємо імпульс, БЕЗ damping.
       // Damping збивав швидкість коли м'яч летів повз край поля.
@@ -1079,8 +1142,10 @@ function applyMagnetBall(gs, s, ball) {
 }
 
 // Release: м'яч вилетів з магніту. Напрямок залежить від збереженого offset'а вздовж ракетки.
-function releaseMagnetBall(gs, s, ball, releaseIndex) {
+function releaseMagnetBall(gs, s, ball, releaseIndex, room) {
   if (!ball['mag_held_' + s]) return;
+  // ── PRE-EVENT STATE ──
+  const preX = ball.x, preY = ball.y, preVx = ball.vx, preVy = ball.vy;
   // Використовуємо ЗБЕРЕЖЕНИЙ offset — не поточну позицію (вона могла оновитись)
   const offX = ball['mag_offX_' + s] || 0;
   const offY = ball['mag_offY_' + s] || 0;
@@ -1127,6 +1192,17 @@ function releaseMagnetBall(gs, s, ball, releaseIndex) {
   ball.vx = Math.round(ball.vx * 10) / 10;
   ball.vy = Math.round(ball.vy * 10) / 10;
   console.log(`[MAG-RELEASE] slot=${s} ball=${String(ball.id).slice(-4)} idx=${releaseIndex||0} pos=(${ball.x.toFixed(0)},${ball.y.toFixed(0)}) v=(${ball.vx.toFixed(1)},${ball.vy.toFixed(1)}) k=${k.toFixed(2)} angle=${(angle*180/Math.PI).toFixed(0)}deg pad=${Math.round(gs.paddles[s])}`);
+  // ── AAA EVENT: magnet release ──
+  if (room) {
+    io.to(room.id).emit('event:ball', {
+      type: 'magnet_release',
+      tick: gs.tick,
+      ballId: ball.id,
+      slot: s,
+      pre:  { x: preX, y: preY, vx: preVx, vy: preVy },
+      post: { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy },
+    });
+  }
 }
 
 
@@ -1442,7 +1518,7 @@ function tick(room) {
         let relIdx = 0;
         for (const b of gs.balls) {
           if (b['mag_held_' + s]) {
-            releaseMagnetBall(gs, s, b, relIdx);
+            releaseMagnetBall(gs, s, b, relIdx, room);
             relIdx++;
           }
         }
@@ -1575,16 +1651,16 @@ function tick(room) {
       if (!isHeldAny) {
         for (const s of SLOTS) {
           if (gs.eliminated[s]) continue;
-          applyFFBall(gs, s, ball);
+          applyFFBall(gs, s, ball, room);
         }
       }
       // Magnetic field: притягання/утримання м'ячів
       for (const s of SLOTS) {
         if (gs.eliminated[s]) continue;
-        applyMagnetBall(gs, s, ball);
+        applyMagnetBall(gs, s, ball, room);
       }
       resolveChamfersBall(ball);
-      clampBallObj(ball);
+      clampBallObj(ball, room, gs);
       // Paddle collisions — пропускаємо для magnet-held (м'яч вже фіксований на paddle)
       let hit = false;
       if (!isHeldAny) {
@@ -1639,7 +1715,7 @@ function tick(room) {
         if (gs.eliminated[1]) {
           // Спершу clamp position — м'яч не повинен пройти за лінію
           ball.y = BR;
-          applyEliminatedWall(gs, 1, ball);
+          applyEliminatedWall(gs, 1, ball, room);
         }
         else {
           io.to(room.id).emit('event:ball', { type: 'remove', tick: gs.tick, ballId: ball.id, scoredSlot: 1 });
@@ -1648,7 +1724,7 @@ function tick(room) {
       } else if (by+BR > H && bx2 > C && bx2 < W-C) {
         if (gs.eliminated[0]) {
           ball.y = H - BR;
-          applyEliminatedWall(gs, 0, ball);
+          applyEliminatedWall(gs, 0, ball, room);
         }
         else {
           io.to(room.id).emit('event:ball', { type: 'remove', tick: gs.tick, ballId: ball.id, scoredSlot: 0 });
@@ -1657,7 +1733,7 @@ function tick(room) {
       } else if (bx2-BR < 0 && by > C && by < H-C) {
         if (gs.eliminated[2]) {
           ball.x = BR;
-          applyEliminatedWall(gs, 2, ball);
+          applyEliminatedWall(gs, 2, ball, room);
         }
         else {
           io.to(room.id).emit('event:ball', { type: 'remove', tick: gs.tick, ballId: ball.id, scoredSlot: 2 });
@@ -1666,7 +1742,7 @@ function tick(room) {
       } else if (bx2+BR > W && by > C && by < H-C) {
         if (gs.eliminated[3]) {
           ball.x = W - BR;
-          applyEliminatedWall(gs, 3, ball);
+          applyEliminatedWall(gs, 3, ball, room);
         }
         else {
           io.to(room.id).emit('event:ball', { type: 'remove', tick: gs.tick, ballId: ball.id, scoredSlot: 3 });
