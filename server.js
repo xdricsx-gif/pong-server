@@ -6,6 +6,8 @@ const { Server } = require('socket.io');
 const { Pool } = require('pg');
 const { createBillingService, createPublisher, registerBillingHandlers } = require('./play-billing');
 let playBilling = null;
+const { createDashboard } = require('./football-dashboard');
+let footballDashboard = null;
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
@@ -620,6 +622,11 @@ function getPublicConfig() {
 }
 
 httpServer.on('request', (req, res) => {
+  if (req.url === '/dashboard' || req.url.startsWith('/dashboard/')) {
+    if (!footballDashboard) { res.writeHead(503, {'Content-Type':'text/plain','Cache-Control':'no-store'}); res.end('Dashboard unavailable'); return; }
+    footballDashboard.handle(req, res).catch(() => { if (!res.headersSent) res.writeHead(503); res.end(); });
+    return;
+  }
   // CORS preflight
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -1990,6 +1997,7 @@ function endGame(room, winnerSlot) {
   commitRewards(room, winnerSlot, places, ratingDeltas, isTraining, trainingRewards);
   // Аналітика
   trackGameEnd(room, winnerSlot, places, isTraining, ratingDeltas);
+  footballDashboard?.match(room, isTraining);
 
   io.to(room.id).emit('game:over', {
     winnerSlot, players: buildPlayers(room),
@@ -2131,6 +2139,7 @@ io.on('connection', (socket) => {
     const resolvedUid = await resolveUid({ idToken, fallbackUid: uid });
     if (resolvedUid) {
       socket.uid = resolvedUid;
+      footballDashboard?.presence(resolvedUid);
     } else {
       socket.uid = undefined;
       socket.emit('shop:error', { msg: 'auth_required' });
@@ -2238,6 +2247,7 @@ io.on('connection', (socket) => {
     // Використовуємо verified uid (або fallback в dev-режимі без Admin)
     const realUid = verifiedUid;
     if (realUid) socket.uid = realUid; // для shop handlers
+    if (realUid) footballDashboard?.presence(realUid);
     if (realUid && !trainingMode) trackPlayerSeen(realUid, platform);
 
     // ── SECURITY: ігноруємо клієнтський paddleStats і rating ──
@@ -2619,6 +2629,11 @@ try {
       databaseURL: 'https://crazy-footbal-default-rtdb.europe-west1.firebasedatabase.app',
     });
     db = admin.firestore();
+    footballDashboard = createDashboard({db, credentials:serviceAccount,
+      verifyIdToken: token => admin.auth().verifyIdToken(token, true),
+      live: () => ({online:new Set([...io.sockets.sockets.values()].map(s=>s.uid).filter(Boolean)).size,
+        rooms:[...rooms.values()].filter(r=>r.status==='playing').length, connections:io.engine.clientsCount})});
+    footballDashboard.initialize();
     console.log('Firebase Admin initialized');
     const playPublisher = createPublisher(serviceAccount);
     playPublisher.checkAccess()
