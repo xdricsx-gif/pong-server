@@ -12,11 +12,17 @@ function createDashboard({db,verifyIdToken,credentials,live,bucket=process.env.P
   async function reports(){return cached('reports',6*3600000,async()=>{
     if(!bucket || !/^pubsite_prod_(rev_)?\d+$/.test(bucket))throw new Error('reports_not_configured');
     const root=`https://storage.googleapis.com/storage/v1/b/${bucket}/o`;
-    let files=[],next;
-    do {const result=await google(storageAuth,root+'?'+new URLSearchParams({prefix:`stats/installs/installs_${PACKAGE}_`,maxResults:'1000',...(next?{pageToken:next}:{})}));files.push(...(result.items||[]).filter(f=>f.name.endsWith('_country.csv')));next=result.nextPageToken;}while(next);
+    // Play grants access to report objects; listing the bucket may be forbidden.
+    // The first report month (April 2026) is verified in Play Console.
+    const files=[]; const now=new Date();
+    for(let month=new Date(Date.UTC(2026,3,1));month<=now;month.setUTCMonth(month.getUTCMonth()+1)) {
+      const ym=month.toISOString().slice(0,7).replace('-','');
+      files.push({name:`stats/installs/installs_${PACKAGE}_${ym}_country.csv`});
+    }
     const rows=[];
-    for(let i=0;i<files.length;i+=4){const parts=await Promise.all(files.slice(i,i+4).map(async f=>parseInstalls(Buffer.from(await google(storageAuth,`${root}/${encodeURIComponent(f.name)}?alt=media`,{responseType:'arraybuffer'})))));parts.forEach(p=>rows.push(...p));}
-    return {rows,files:files.length,syncedAt:new Date().toISOString()};
+    let found=0;
+    for(let i=0;i<files.length;i+=4){const parts=await Promise.all(files.slice(i,i+4).map(async f=>{try{const bytes=await google(storageAuth,`${root}/${encodeURIComponent(f.name)}?alt=media`,{responseType:'arraybuffer'});found++;return parseInstalls(Buffer.from(bytes));}catch(e){if(e.response?.status===404)return [];throw e;}}));parts.forEach(p=>rows.push(...p));}
+    return {rows,files:found,syncedAt:new Date().toISOString()};
   });}
   async function collection(name,fields){let all=[],after;do{let query=db.collection(name).select(...fields).orderBy('__name__').limit(1000);if(after)query=query.startAfter(after);const s=await query.get();all.push(...s.docs.map(d=>({id:d.id,...d.data()})));after=s.docs.at(-1);if(s.size<1000)return {rows:all,partial:false};}while(all.length<50000);return {rows:all,partial:true};}
   async function base(){return cached('base',300000,async()=>{
@@ -25,7 +31,7 @@ function createDashboard({db,verifyIdToken,credentials,live,bucket=process.env.P
   });}
   async function order(orderId){if(!orderId || !/^GPA\.[\w.-]+$/.test(orderId))return null;return cached('order:'+orderId,15*60000,()=>google(playAuth,`https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PACKAGE}/orders/${encodeURIComponent(orderId)}?fields=state,total,developerRevenueInBuyerCurrency,createTime`));}
   async function summary(from,to){
-    const [b,r]=await Promise.all([base(),reports().then(value=>({ok:true,...value})).catch(e=>({ok:false,error:e.response?.status===403?'access_denied':e.message==='reports_not_configured'?'not_configured':'sync_failed'}))]);
+    const [b,r]=await Promise.all([base(),reports().then(value=>({ok:true,...value})).catch(e=>{let info=e.response?.data;if(Buffer.isBuffer(info)||info instanceof ArrayBuffer){try{info=JSON.parse(Buffer.from(info).toString());}catch{info={};}}const reason=info?.error?.errors?.[0]?.reason||info?.error?.status||'unknown';console.log('[Dashboard] Play reports unavailable',e.response?.status||0,reason);return {ok:false,error:e.response?.status===403?'access_denied':e.message==='reports_not_configured'?'not_configured':'sync_failed',reason};})]);
     const ledger=b.ledger?.rows.filter(p=>day(p.grantedAt)>=from && day(p.grantedAt)<=to)||[];
     const orders=new Map();const ids=[...new Set(ledger.filter(p=>!p.testPurchase).map(p=>p.orderId).filter(Boolean))];
     for(let i=0;i<ids.length;i+=5)await Promise.all(ids.slice(i,i+5).map(async id=>{try{orders.set(id,await order(id));}catch{}}));
