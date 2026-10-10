@@ -650,14 +650,17 @@ httpServer.on('request', (req, res) => {
     res.end('ok');
     return;
   }
-  if (['GET', 'HEAD'].includes(req.method) && req.url.split('?')[0] === '/delete-account') {
+  const publicPages = { '/delete-account': 'delete-account.html', '/privacy': 'privacy.html' };
+  const pagePath = req.url.split('?')[0];
+  const publicPage = Object.prototype.hasOwnProperty.call(publicPages, pagePath) ? publicPages[pagePath] : null;
+  if (['GET', 'HEAD'].includes(req.method) && publicPage) {
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'public, max-age=300',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
     });
-    res.end(req.method === 'HEAD' ? undefined : readFileSync(join(__dirname, 'delete-account.html')));
+    res.end(req.method === 'HEAD' ? undefined : readFileSync(join(__dirname, publicPage)));
     return;
   }
   // Інші маршрути — нехай socket.io сам обробляє (handshake etc).
