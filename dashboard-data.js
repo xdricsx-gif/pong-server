@@ -53,4 +53,22 @@ function summarizeOrders(ledger,orders) {
   }
   return {count:real.length, buyers:new Set(real.map(p=>p.uid)).size,tests:ledger.length-real.length,refunds,consumptionPending,missing,totals,products,rows:rows.sort((a,b)=>b.date.localeCompare(a.date)).slice(0,100)};
 }
-module.exports={PACKAGE,day,csvRows,parseInstalls,aggregateInstalls,money,summarizeOrders};
+function validateReportUpload(files) {
+  if(!Array.isArray(files)||!files.length||files.length>24)throw new Error('invalid_reports');
+  const result=[];
+  for(const f of files){
+    const match=typeof f.name==='string'&&f.name.match(/^(?:stats_installs_)?installs_com\.galaxyfootball\.app_(\d{6})_country(?: \(\d+\))?\.csv$/);
+    if(!match||typeof f.base64!=='string'||f.base64.length>2000000||! /^[A-Za-z0-9+/]*={0,2}$/.test(f.base64))throw new Error('invalid_reports');
+    const bytes=Buffer.from(f.base64,'base64');const raw=csvRows(bytes),rows=parseInstalls(bytes);
+    if(!rows.length||rows.length!==raw.length||rows.length>10000)throw new Error('invalid_reports');
+    const unique=new Set();
+    for(const r of rows){
+      if(day(r.date)!==r.date||r.date>day(new Date())||r.date.slice(0,7).replace('-','')!==match[1]||r.country.length>80||r.installs===null||r.uninstalls===null||r.installed===null)throw new Error('invalid_reports');
+      if(Object.entries(r).some(([k,v])=>!['date','country'].includes(k)&&v!==null&&(!Number.isSafeInteger(v)||v<0)))throw new Error('invalid_reports');
+      const key=r.date+'/'+r.country;if(unique.has(key))throw new Error('invalid_reports');unique.add(key);
+    }
+    result.push(...rows);
+  }
+  return [...new Map(result.map(r=>[r.date+'/'+r.country,r])).values()];
+}
+module.exports={PACKAGE,day,csvRows,parseInstalls,aggregateInstalls,money,summarizeOrders,validateReportUpload};
