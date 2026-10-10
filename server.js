@@ -2,6 +2,8 @@
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const { Pool } = require('pg');
+const { createBillingService, createPublisher, registerBillingHandlers } = require('./play-billing');
+let playBilling = null;
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
@@ -2105,6 +2107,7 @@ io.on('connection', (socket) => {
 
   // Реєструємо shop handlers для цього сокета
   registerShopHandlers(socket);
+  registerBillingHandlers(socket, () => playBilling);
 
   // Аутентифікація для shop без mm:join (з меню/магазину)
   // SECURITY: верифікуємо idToken і використовуємо тільки verified UID.
@@ -2602,6 +2605,16 @@ try {
     });
     db = admin.firestore();
     console.log('Firebase Admin initialized');
+    const playPublisher = createPublisher(serviceAccount);
+    playPublisher.checkAccess()
+      .then(() => console.log('Google Play billing API ready'))
+      .catch(error => console.log('Google Play billing API not ready:', error.code));
+    playBilling = createBillingService({
+      db,
+      verifyIdToken: token => admin.auth().verifyIdToken(token, true),
+      publisher: playPublisher,
+      enabled: process.env.GOOGLE_PLAY_BILLING_ENABLED === 'true',
+    });
   }
 } catch(e) {
   console.log('Firebase Admin not available:', e.message);
