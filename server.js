@@ -1,5 +1,7 @@
 // SERVER FINAL — Authoritative 60 tick
 const { createServer } = require('http');
+const { readFileSync } = require('fs');
+const { join } = require('path');
 const { Server } = require('socket.io');
 const { Pool } = require('pg');
 const { createBillingService, createPublisher, registerBillingHandlers } = require('./play-billing');
@@ -646,6 +648,16 @@ httpServer.on('request', (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, {'Content-Type': 'text/plain'});
     res.end('ok');
+    return;
+  }
+  if (['GET', 'HEAD'].includes(req.method) && req.url.split('?')[0] === '/delete-account') {
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'public, max-age=300',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+    });
+    res.end(req.method === 'HEAD' ? undefined : readFileSync(join(__dirname, 'delete-account.html')));
     return;
   }
   // Інші маршрути — нехай socket.io сам обробляє (handshake etc).
