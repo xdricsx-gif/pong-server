@@ -120,7 +120,7 @@ function createPublisher(credentials) {
   return {
     async checkAccess() {
       if (Date.now() - checkedAt < 60000) return;
-      await request(`${base}/monetization/onetimeproducts?pageSize=1`);
+      await request(`${base}/oneTimeProducts?pageSize=1`);
       checkedAt = Date.now();
     },
     getPurchase: token => request(`${base}/purchases/productsv2/tokens/${encodeURIComponent(token)}`),
