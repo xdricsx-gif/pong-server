@@ -1,18 +1,38 @@
 /* Shared authoritative physics. Same file in Node and Android/WebView.
  * No clocks, network, database or unseeded randomness. Complete replay checkpoints.
- * Existing magnet/game balance retained; moving contact resolution and step ownership are new.
+ * Shared magnet pull, surface capture, release and edge-triggered energy accounting.
  */
 (function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory();
 else root.GalaxyPhysics=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 
-const VERSION='gf-net2-2';
+const VERSION='gf-net2-3';
 const TICK_RATE=60,TICK_MS=1000/60,W=520,H=520,BR=8,SMAX=4.875,C=130;
 const PL=54,PLV=54,PTH=16,PTV=16,ML=10,EPU=1/3,ECR=1/10000,FDR=380,FR=54,PS=3.375;
 const SLOTS=[0,1,2,3],SLOT_VIEW=['bottom','top','left','right'];
 const ELIM_WALL_BOOST=1.30,ELIM_WALL_RANDOM_DEG=25,ELIM_WALL_MIN_SP=3.5,ELIM_WALL_MAX_SP=6.5;
-const MAG_R=75,MAG_PULL_FORCE=.35,MAG_CAPTURE_RADIUS=55,MAG_RELEASE_PUSH=3.5;
-const MAG_DRAIN_PER_MS=1/5000,MAG_REGEN_PER_MS=1/10000,MAG_MIN_ENERGY=.10;
+const MAG_R=75,MAG_PULL_FORCE=1.15,MAG_CAPTURE_RADIUS=3,MAG_RELEASE_PUSH=SMAX;
+const MAG_DRAIN_PER_MS=1/5000,MAG_REGEN_PER_MS=1/10000,MAG_START_COST=.20;
+function magnetRadius(stats){return clamp(MAG_R*(stats?.fr||FR)/FR,40,250);}
+function magnetGeometry(s,p,stats){
+  const nx=s===2?1:s===3?-1:0,ny=s===0?-1:s===1?1:0;
+  const half=(s<2?p.w:p.h)/2,depth=(s<2?p.h:p.w)/2+BR+1;
+  return {cx:p.x+p.w/2,cy:p.y+p.h/2,nx,ny,tx:s<2?1:0,ty:s<2?0:1,
+    half,depth,radius:magnetRadius(stats)};
+}
+// The pressed latch survives checkpoints and prevents auto-restarting on an empty battery.
+function updateMagnetEnergy(gs,s,want,dt=TICK_MS){
+  if(!gs.magPressed)gs.magPressed=[false,false,false,false];
+  const was=!!gs.magnet[s],pressed=!!want&&!gs.magPressed[s];
+  gs.magPressed[s]=!!want;
+  let active=was&&want&&gs.magEnergy[s]>0;
+  if(pressed&&!was&&gs.magEnergy[s]+1e-9>=MAG_START_COST){
+    gs.magEnergy[s]=Math.max(0,gs.magEnergy[s]-MAG_START_COST);active=true;
+  }
+  if(active){gs.magEnergy[s]=round(Math.max(0,gs.magEnergy[s]-MAG_DRAIN_PER_MS*dt));active=gs.magEnergy[s]>0;}
+  else if(!want)gs.magEnergy[s]=round(Math.min(1,gs.magEnergy[s]+MAG_REGEN_PER_MS*dt));
+  gs.magnet[s]=!!active;return was&&!active;
+}
 const CS=[{ax:0,ay:C,bx:C,by:0,nx:Math.SQRT1_2,ny:Math.SQRT1_2},
 {ax:W-C,ay:0,bx:W,by:C,nx:-Math.SQRT1_2,ny:Math.SQRT1_2},
 {ax:0,ay:H-C,bx:C,by:H,nx:Math.SQRT1_2,ny:-Math.SQRT1_2},
@@ -140,109 +160,51 @@ function applyEliminatedWall(gs, slot, ball, room) {
   }
 }
 
-function isBallInMagnet(gs, s, ball) {
-  const p = slotToPaddle(s, gs.paddles[s], gs, gs.config);
-  const fcx = p.x + p.w/2, fcy = p.y + p.h/2;
-  const dx = ball.x - fcx, dy = ball.y - fcy;
-  const dist = Math.hypot(dx, dy);
-  if (dist > MAG_R + BR) return null;
-  const view = SLOT_VIEW[s];
-  let faceNy = 0, faceNx = 0;
-  if (view === 'bottom')     { faceNx = 0; faceNy = -1; }
-  else if (view === 'top')   { faceNx = 0; faceNy =  1; }
-  else if (view === 'left')  { faceNx = 1; faceNy =  0; }
-  else                       { faceNx =-1; faceNy =  0; }
-  const dot = dx * faceNx + dy * faceNy;
-  if (dot < 0) return null; // м'яч позаду ракетки — не тягнемо
-  return { p, fcx, fcy, dist, dx, dy, faceNx, faceNy };
-}
-
-function applyMagnetBall(gs, s, ball, room) {
-  if (!gs.magnet[s]) return false;
-  if ((ball['mag_release_until_'+s]||0)>gs.tick) return false;
-  const p = slotToPaddle(s, gs.paddles[s], gs, gs.config);
-  const fcx = p.x + p.w/2, fcy = p.y + p.h/2;
-  const view = SLOT_VIEW[s];
-  let nx = 0, ny = 0;
-  if (view === 'bottom')     { nx = 0; ny = -1; }
-  else if (view === 'top')   { nx = 0; ny =  1; }
-  else if (view === 'left')  { nx = 1; ny =  0; }
-  else                       { nx =-1; ny =  0; }
-  const dx = ball.x - fcx, dy = ball.y - fcy;
-  const dist = Math.hypot(dx, dy);
-  if (dist > MAG_R + BR) {
-    if (ball['mag_held_' + s]) {
-      releaseMagnetBall(gs, s, ball, 0, room);
-    }
-    delete ball['_magInZone_' + s];
-    return false;
+// Attraction is continuous; capture occurs only at the paddle's front surface.
+// old is the start-of-tick ball position for swept capture against a moving paddle.
+function applyMagnetBall(gs,s,ball,room,old){
+  if(!gs.magnet[s]||(ball['mag_release_until_'+s]||0)>gs.tick)return false;
+  const heldKey='mag_held_'+s,ox='mag_offX_'+s,oy='mag_offY_'+s;
+  const p=slotToPaddle(s,gs.paddles[s],gs,gs.config);
+  const g=magnetGeometry(s,p,gs.config.players[s].paddleStats);
+  if(ball[heldKey]){
+    const x=g.cx+(ball[ox]||0),y=g.cy+(ball[oy]||0);
+    ball.vx=x-ball.x;ball.vy=y-ball.y;ball.x=x;ball.y=y;return true;
   }
-  const frontDot = dx * nx + dy * ny;
-  if (frontDot < 0) {
-    if (ball['mag_held_' + s]) {
-      releaseMagnetBall(gs, s, ball, 0, room);
+  const dx=ball.x-g.cx,dy=ball.y-g.cy,dist=Math.hypot(dx,dy);
+  const front=dx*g.nx+dy*g.ny,tangent=dx*g.tx+dy*g.ty;
+  if(front<0||dist>=g.radius)return false;
+  const limit=Math.max(0,g.half-BR),at=clamp(tangent,-limit,limit);
+  let tx=g.cx+g.nx*g.depth+g.tx*at,ty=g.cy+g.ny*g.depth+g.ty*at;
+  let toX=tx-ball.x,toY=ty-ball.y,toD=Math.hypot(toX,toY);
+  let capture=toD<=MAG_CAPTURE_RADIUS;
+  if(!capture&&old){
+    const move=gs.paddles[s]-(gs.paddlesPrev?.[s]??gs.paddles[s]);
+    const odx=old.x-g.cx+g.tx*move,ody=old.y-g.cy+g.ty*move;
+    const of=odx*g.nx+ody*g.ny,ot=odx*g.tx+ody*g.ty;
+    if(of>=g.depth&&front<=g.depth&&of-front>1e-9){
+      const fraction=(of-g.depth)/(of-front),cross=ot+(tangent-ot)*fraction;
+      if(Math.abs(cross)<=limit){capture=true;tx=g.cx+g.nx*g.depth+g.tx*cross;ty=g.cy+g.ny*g.depth+g.ty*cross;}
     }
-    return false;
   }
-  const offKey_X = 'mag_offX_' + s;
-  const offKey_Y = 'mag_offY_' + s;
-  const heldKey  = 'mag_held_' + s;
-  if (!ball[heldKey]) {
-    const tgtX = fcx + nx * MAG_R * 0.40;
-    const tgtY = fcy + ny * MAG_R * 0.40;
-    const toX = tgtX - ball.x, toY = tgtY - ball.y;
-    const toD = Math.hypot(toX, toY);
-    if (toD < MAG_CAPTURE_RADIUS) {
-      const preX = ball.x, preY = ball.y, preVx = ball.vx, preVy = ball.vy;
-      ball[heldKey] = true;
-      ball[offKey_X] = ball.x - fcx;
-      ball[offKey_Y] = ball.y - fcy;
-      ball.vx = 0;
-      ball.vy = 0;
-      delete ball['_magInZone_' + s];
-      if (room) {
-        emit(gs, 'event:ball', {
-          type: 'magnet_capture',
-          tick: gs.tick,
-          ballId: ball.id,
-          slot: s,
-          pre:  { x: preX, y: preY, vx: preVx, vy: preVy },
-          post: { x: ball.x, y: ball.y, vx: 0, vy: 0 },
-          offX: ball[offKey_X], offY: ball[offKey_Y],
-        });
-      }
-    } else {
-      if (toD > 0.1) {
-        const tnx = toX / toD, tny = toY / toD;
-        const pull = MAG_PULL_FORCE * 2.0;
-        ball.vx += tnx * pull;
-        ball.vy += tny * pull;
-      }
-      ball['_magInZone_' + s] = (ball['_magInZone_' + s] || 0) + 1;
-      if (ball['_magInZone_' + s] === 10 || ball['_magInZone_' + s] === 20) {
-      }
-    }
+  if(capture){
+    const pre={x:ball.x,y:ball.y,vx:ball.vx,vy:ball.vy};
+    ball[heldKey]=true;ball[ox]=tx-g.cx;ball[oy]=ty-g.cy;
+    ball.x=tx;ball.y=ty;ball.vx=0;ball.vy=0;
+    if(room)emit(gs,'event:ball',{type:'magnet_capture',tick:gs.tick,ballId:ball.id,slot:s,pre,
+      post:{x:ball.x,y:ball.y,vx:0,vy:0},offX:ball[ox],offY:ball[oy]});
     return true;
   }
-  const offX = ball[offKey_X] || 0;
-  const offY = ball[offKey_Y] || 0;
-  const offDist = Math.hypot(offX, offY);
-  if (offDist > MAG_R * 0.85) {
-    const scale = (MAG_R * 0.85) / offDist;
-    ball[offKey_X] = offX * scale;
-    ball[offKey_Y] = offY * scale;
+  // Smoothstep reaches zero with zero slope at the range edge (no impulse seam).
+  const u=clamp(1-dist/g.radius,0,1),weight=u*u*(3-2*u);
+  if(toD>1e-9){
+    const ax=toX/toD,ay=toY/toD,along=ball.vx*ax+ball.vy*ay;
+    // Only damp transverse motion near the ship, avoiding perpetual orbits.
+    const drag=.18*weight;
+    ball.vx+=(ax*along-ball.vx)*drag+ax*MAG_PULL_FORCE*weight;
+    ball.vy+=(ay*along-ball.vy)*drag+ay*MAG_PULL_FORCE*weight;
+    const speed=Math.hypot(ball.vx,ball.vy);if(speed>SMAX){ball.vx*=SMAX/speed;ball.vy*=SMAX/speed;}
   }
-  const finalOffX = ball[offKey_X] || 0;
-  const finalOffY = ball[offKey_Y] || 0;
-  const newX = fcx + finalOffX;
-  const newY = fcy + finalOffY;
-  const moveDelta = Math.hypot(newX - ball.x, newY - ball.y);
-  if (moveDelta > 15) {
-  }
-  ball.vx = newX - ball.x;
-  ball.vy = newY - ball.y;
-  ball.x = newX;
-  ball.y = newY;
   return true;
 }
 
@@ -266,7 +228,7 @@ function releaseMagnetBall(gs, s, ball, releaseIndex, room) {
   const half = p.w/2 * (tx !== 0 ? 1 : 0) + p.h/2 * (ty !== 0 ? 1 : 0);
   let k = tangentOffset / Math.max(half, 1);
   if (k > 1) k = 1; else if (k < -1) k = -1;
-  const indexOffset = (releaseIndex||0) * 0.20; // ~11° зсув за кожний м'яч
+  const indexOffset = (releaseIndex||0) * 0.12;
   k = k + (k >= 0 ? -indexOffset : indexOffset);
   if (k > 1) k = 1; else if (k < -1) k = -1;
   const MAX_ANGLE = Math.PI / 3;
@@ -275,15 +237,13 @@ function releaseMagnetBall(gs, s, ball, releaseIndex, room) {
   const outX = nx * cosA + tx * sinA;
   const outY = ny * cosA + ty * sinA;
   const targetSp = Math.min(MAG_RELEASE_PUSH, SMAX);
-  ball.vx = outX * targetSp;
-  ball.vy = outY * targetSp;
+  const move=gs.paddles[s]-(gs.paddlesPrev?.[s]??gs.paddles[s]);
+  const vx=outX*targetSp+tx*move*.35,vy=outY*targetSp+ty*move*.35,sp=Math.hypot(vx,vy);
+  ball.vx=vx/sp*targetSp;ball.vy=vy/sp*targetSp;
   // Release from the held position, not 85px away. A short capture cooldown
   // replaces the old teleport and is part of rollback state.
   ball['mag_release_until_'+s] = gs.tick + 12;
-  ball.x  = Math.round(ball.x  * 10) / 10;
-  ball.y  = Math.round(ball.y  * 10) / 10;
-  ball.vx = Math.round(ball.vx * 10) / 10;
-  ball.vy = Math.round(ball.vy * 10) / 10;
+  ball.x=round(ball.x);ball.y=round(ball.y);ball.vx=round(ball.vx);ball.vy=round(ball.vy);
   ball.contact=(ball.contact||0)+1;
   if (room) {
     emit(gs, 'event:ball', {
@@ -371,7 +331,7 @@ function create(options={}) {
   }
   const gs={version:VERSION,config,tick:0,rng:(options.seed??123456789)>>>0,nextBallId:1,
     paddles:arr(260),paddlesPrev:arr(260),balls:[],respawns:[],lives:arr(ML),scores:arr(0),
-    energy:arr(1),fields:arr(()=>({active:false,t:0,r:0,maxR:FR})),magEnergy:arr(1),magnet:arr(false),
+    energy:arr(1),fields:arr(()=>({active:false,t:0,r:0,maxR:FR})),magEnergy:arr(1),magnet:arr(false),magPressed:arr(false),
     eliminated:arr(false),eliminationOrder:[],connected:arr(true),botTargets:arr(260),
     inputs:arr(()=>({tick:0,dx:0,magnet:false,boost:0})),lastBoost:arr(0),gameOver:false,winner:null,events:[]};
   for(let i=0;i<4;i++)queueBall(gs,(options.spawnDelayMs??8000)+i*2000);
@@ -427,10 +387,9 @@ function step(gs,commands={},systems=[]) {
     if(input.boost>gs.lastBoost[s]){gs.lastBoost[s]=input.boost;
       if(fresh&&!f.active&&gs.energy[s]>=EPU){f.active=true;f.t=0;f.r=0;f.maxR=stats.fr;gs.energy[s]-=EPU;
         emit(gs,'event:field',{type:'activate',slot:s,tick:gs.tick,paddleX:gs.paddles[s],maxR:f.maxR});}}
-    const was=gs.magnet[s];gs.magnet[s]=fresh&&input.magnet&&(was?gs.magEnergy[s]>0:gs.magEnergy[s]>=MAG_MIN_ENERGY);
-    if(gs.magnet[s])gs.magEnergy[s]=Math.max(0,gs.magEnergy[s]-MAG_DRAIN_PER_MS*TICK_MS);
-    else {gs.magEnergy[s]=Math.min(1,gs.magEnergy[s]+MAG_REGEN_PER_MS*TICK_MS);
-      if(was){let i=0;for(const b of gs.balls)if(b['mag_held_'+s])releaseMagnetBall(gs,s,b,i++,gs.config);}}
+    if(updateMagnetEnergy(gs,s,fresh&&input.magnet)){
+      let i=0;for(const b of gs.balls)if(b['mag_held_'+s])releaseMagnetBall(gs,s,b,i++,gs.config);
+    }
   }
   for(let i=gs.respawns.length-1;i>=0;i--){const r=gs.respawns[i];r.timer=round(r.timer-TICK_MS);
     if(r.timer<=.0001){gs.balls.push({id:gs.nextBallId++,x:260,y:260,vx:r.vx,vy:r.vy,contact:0});gs.respawns.splice(i,1);}}
@@ -440,7 +399,7 @@ function step(gs,commands={},systems=[]) {
       for(const s of SLOTS)if(!gs.eliminated[s])applyFFBall(gs,s,b,old);}
     // A ball belongs to at most one magnet. Stable slot order resolves simultaneous capture.
     for(const s of SLOTS){if(gs.eliminated[s]||(held!==undefined&&held!==s))continue;
-      const had=!!b['mag_held_'+s];applyMagnetBall(gs,s,b,gs.config);
+      const had=!!b['mag_held_'+s];applyMagnetBall(gs,s,b,gs.config,old);
       if(had!==!!b['mag_held_'+s])b.contact=(b.contact||0)+1;
       if(b['mag_held_'+s])held=s;}
     if(held===undefined){resolveChamfersBall(b);clampBallObj(b,gs.config,gs);
@@ -462,8 +421,13 @@ function step(gs,commands={},systems=[]) {
   for(const s of SLOTS){gs.energy[s]=round(gs.energy[s]);gs.magEnergy[s]=round(gs.magEnergy[s]);}
   finishIfNeeded(gs);return gs;
 }
-function checkpoint(gs){const s=clone(gs);s.events=[];return s;}
+function copyPhysics(value){
+  if(Array.isArray(value))return value.map(copyPhysics);
+  if(value&&typeof value==='object'){const out={};for(const key of Object.keys(value))if(value[key]!==undefined)out[key]=copyPhysics(value[key]);return out;}
+  return value;
+}
+function checkpoint(gs){const out={};for(const key of Object.keys(gs))out[key]=key==='events'?[]:copyPhysics(gs[key]);return out;}
 function hash(gs){const s=checkpoint(gs),str=JSON.stringify(s);let h=2166136261;
   for(let i=0;i<str.length;i++)h=Math.imul(h^str.charCodeAt(i),16777619);return (h>>>0).toString(16);}
-return {VERSION,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall};
+return {VERSION,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall};
 });

@@ -73,10 +73,11 @@ test('moving field CCD catches relative crossing even when both endpoints are ou
 });
 test('four magnet balls follow one moving paddle and release once at bounded speed',()=>{
   const w=world();w.balls=[0,1,2,3].map(id=>({id,x:250+id*6,y:470,vx:0,vy:3,contact:0}));
-  P.step(w,{0:cmd(1,0,0,true)});assert.ok(w.balls.every(b=>b.mag_held_0));
-  for(let t=2;t<20;t++)P.step(w,{0:cmd(t,1,0,true)});
+  for(let t=1;t<=20;t++)P.step(w,{0:cmd(t,0,0,true)});
+  assert.ok(w.balls.every(b=>b.mag_held_0));
+  for(let t=21;t<40;t++)P.step(w,{0:cmd(t,1,0,true)});
   assert.ok(w.balls.every(b=>Math.abs(b.x-w.paddles[0])<30));
-  P.step(w,{0:cmd(20,0,0,false)});assert.ok(w.balls.every(b=>!b.mag_held_0&&Math.hypot(b.vx,b.vy)<5));
+  P.step(w,{0:cmd(40,0,0,false)});assert.ok(w.balls.every(b=>!b.mag_held_0&&Math.hypot(b.vx,b.vy)<5));
   assert.equal(w.events.filter(e=>e.data.type==='magnet_release').length,4);
 });
 test('loss stops held movement/magnet; reconnect discards old future commands',()=>{

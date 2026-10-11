@@ -110,7 +110,13 @@ class Client {
     this.clockOffset=best.offset;this.setRtt(this.rtt*.8+rtt*.2);
   }
   suspend(){this.paused=true;this.input={dx:0,magnet:false};this.boostQueued=false;this.needsSync=true;}
-  resume(){this.paused=false;this.pending.clear();this.boostQueued=false;this.needsSync=true;this.resumeRequested=true;this.requestSync(true);}
+  requestSynchronization(now,reset=false){
+    // Every entry path shares the retry clock. A between-frame resume anchors
+    // its retry on the next frame without sending another immediate request.
+    this.lastSyncRequest=Number.isFinite(now)?now:null;
+    this.requestSync(reset);
+  }
+  resume(){this.paused=false;this.pending.clear();this.boostQueued=false;this.needsSync=true;this.resumeRequested=true;this.requestSynchronization(null,true);}
   commandsAt(tick){
     const accepted=this.remoteCommands.get(tick)||{},local=this.pending.get(tick);
     // The server's immutable accepted command wins any same-tick conflict.
@@ -180,9 +186,13 @@ class Client {
   desiredTick(now){return this.anchorTick+(now-this.anchorTime)/DT+2+Math.ceil(Math.max(0,this.rtt-140)/(2*DT));}
   advance(now){
     if(!this.world||this.paused)return;
-    if(this.needsSync){if(now-this.lastSyncRequest>=1000){this.lastSyncRequest=now;this.requestSync(this.resumeRequested);}return;}
+    if(this.needsSync){
+      if(this.lastSyncRequest===null)this.lastSyncRequest=now;
+      else if(now-this.lastSyncRequest>=1000)this.requestSynchronization(now,this.resumeRequested);
+      return;
+    }
     // A long outage suspends prediction instead of inventing seconds of collisions.
-    if(now-this.lastReceived>400){if(!this.needsSync){this.metrics.predictionStops++;this.needsSync=true;this.requestSync();}return;}
+    if(now-this.lastReceived>400){if(!this.needsSync){this.metrics.predictionStops++;this.needsSync=true;this.requestSynchronization(now);}return;}
     const target=Math.min(Math.floor(this.desiredTick(now)),this.base.tick+MAX_PREDICT);
     let steps=0;
     while(this.world.tick<target&&steps++<MAX_PREDICT){

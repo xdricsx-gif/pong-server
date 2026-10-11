@@ -4,6 +4,7 @@ const { readFileSync } = require('fs');
 const { join } = require('path');
 const { Server } = require('socket.io');
 const netcode2 = require('./netcode-server');
+console.log('[Netcode] '+netcode2.VERSION);
 const { Pool } = require('pg');
 const { createBillingService, createPublisher, registerBillingHandlers } = require('./play-billing');
 let playBilling = null;
@@ -2243,6 +2244,9 @@ io.on('connection', (socket) => {
 
   socket.on('mm:join', async ({ nick, rating, uid, idToken, wins, games, paddleStats, trainingMode, avatarId, platform, netVersion }) => {
     if (myRoom && myRoom.status === 'playing') return;
+    if(!trainingMode&&(netVersion!==netcode2.VERSION||process.env.NETCODE_V2==='0')){
+      socket.emit('mm:error','Оновіть Galaxy Football у Google Play до версії 20.11 або новішої.');return;
+    }
     // ── SECURITY: верифікуємо idToken, витягуємо реальний uid ──
     const verifiedUid = await resolveUid({ idToken, fallbackUid: uid });
     if (admin && !verifiedUid && !trainingMode) {
