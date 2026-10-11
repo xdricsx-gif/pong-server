@@ -6,7 +6,7 @@
 else root.GalaxyPhysics=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 
-const VERSION='gf-net2-3';
+const VERSION='gf-net2-4';
 const TICK_RATE=60,TICK_MS=1000/60,W=520,H=520,BR=8,SMAX=4.875,C=130;
 const PL=54,PLV=54,PTH=16,PTV=16,ML=10,EPU=1/3,ECR=1/10000,FDR=380,FR=54,PS=3.375;
 const SLOTS=[0,1,2,3],SLOT_VIEW=['bottom','top','left','right'];
@@ -323,7 +323,8 @@ function queueBall(gs,delay) {
   gs.respawns.push({timer:delay??Math.max(2000,tail+2000),vx:round(Math.cos(ang)*speed),vy:round(Math.sin(ang)*speed)});
 }
 function create(options={}) {
-  const config={players:[],durationTicks:options.durationTicks||10800};
+  const mode=['ranked','team','duel','training'].includes(options.mode)?options.mode:'ranked';
+  const config={players:[],mode,activeSlots:mode==='duel'?[0,1]:[0,1,2,3],teams:mode==='team'?[0,1,1,0]:null,durationTicks:options.durationTicks||10800};
   const arr=v=>SLOTS.map(()=>typeof v==='function'?v():v);
   for(const s of SLOTS){const p=options.players?.[s]||{},st=p.paddleStats||{};
     config.players[s]={bot:!!p.bot,paddleStats:{w:clamp(st.w||PL,10,250),spd:clamp(st.spd||PS,.1,50),
@@ -332,8 +333,10 @@ function create(options={}) {
   const gs={version:VERSION,config,tick:0,rng:(options.seed??123456789)>>>0,nextBallId:1,
     paddles:arr(260),paddlesPrev:arr(260),balls:[],respawns:[],lives:arr(ML),scores:arr(0),
     energy:arr(1),fields:arr(()=>({active:false,t:0,r:0,maxR:FR})),magEnergy:arr(1),magnet:arr(false),magPressed:arr(false),
-    eliminated:arr(false),eliminationOrder:[],connected:arr(true),botTargets:arr(260),
-    inputs:arr(()=>({tick:0,dx:0,magnet:false,boost:0})),lastBoost:arr(0),gameOver:false,winner:null,events:[]};
+    eliminated:SLOTS.map(s=>!config.activeSlots.includes(s)),eliminationOrder:[],connected:SLOTS.map(s=>config.activeSlots.includes(s)),botTargets:arr(260),
+    inputs:arr(()=>({tick:0,dx:0,magnet:false,boost:0})),lastBoost:arr(0),gameOver:false,winner:null,
+    teamLives:mode==='team'?[20,20]:null,teamScores:mode==='team'?[0,0]:null,winnerTeam:null,endReason:null,events:[]};
+  if(mode==='team')gs.lives=arr(20);
   for(let i=0;i<4;i++)queueBall(gs,(options.spawnDelayMs??8000)+i*2000);
   return gs;
 }
@@ -345,9 +348,24 @@ function eliminate(gs,s,reason) {
   emit(gs,'eliminated',{slot:s,reason,tick:gs.tick});
 }
 function finishIfNeeded(gs) {
-  const alive=SLOTS.filter(s=>!gs.eliminated[s]);
+  const slots=gs.config.activeSlots||SLOTS,alive=slots.filter(s=>!gs.eliminated[s]);
+  if(gs.config.mode==='team'){
+    const teams=[0,1].filter(t=>alive.some(s=>gs.config.teams[s]===t));
+    if(teams.length>1&&gs.tick<gs.config.durationTicks)return;
+    const available=alive.some(s=>gs.connected[s]||gs.config.players[s].bot);
+    gs.gameOver=true;
+    gs.winnerTeam=!available||!teams.length?null:teams.length===1?teams[0]:gs.teamScores[0]===gs.teamScores[1]?null:gs.teamScores[0]<gs.teamScores[1]?0:1;
+    gs.winner=gs.winnerTeam===null?null:slots.find(s=>gs.config.teams[s]===gs.winnerTeam);
+    gs.endReason=!available&&!slots.some(s=>gs.connected[s])?'abandoned':gs.winner===null?'draw':'complete';
+    emit(gs,'finish',{winner:gs.winner,winnerTeam:gs.winnerTeam,tick:gs.tick});return;
+  }
   if(alive.length<=1||gs.tick>=gs.config.durationTicks){
-    gs.gameOver=true;gs.winner=alive.sort((a,b)=>gs.lives[b]-gs.lives[a]||gs.scores[a]-gs.scores[b]||a-b)[0]??gs.eliminationOrder.at(-1)??0;
+    gs.gameOver=true;
+    const available=alive.some(s=>gs.connected[s]||gs.config.players[s].bot);
+    const bestLives=Math.max(...alive.map(s=>gs.lives[s]));
+    const tied=alive.length>1&&alive.filter(s=>gs.lives[s]===bestLives).length>1;
+    gs.winner=!available||tied?null:alive.sort((a,b)=>gs.lives[b]-gs.lives[a]||gs.scores[a]-gs.scores[b]||a-b)[0]??null;
+    gs.endReason=!available?'abandoned':tied?'draw':'complete';
     emit(gs,'finish',{winner:gs.winner,tick:gs.tick});
   }
 }
@@ -409,11 +427,18 @@ function step(gs,commands={},systems=[]) {
         else if(b.y+BR>H&&b.x>C&&b.x<W-C)goal=0;
         else if(b.x-BR<0&&b.y>C&&b.y<H-C)goal=2;
         else if(b.x+BR>W&&b.y>C&&b.y<H-C)goal=3;
-        if(goal>=0){if(gs.eliminated[goal]){
+        if(goal>=0){if(gs.eliminated[goal]&&gs.config.mode!=='team'){
           if(goal<2)b.y=goal===0?H-BR:BR;else b.x=goal===2?BR:W-BR;
-          applyEliminatedWall(gs,goal,b,gs.config);b.contact=(b.contact||0)+1;
-        }else{gs.scores[goal]++;gs.lives[goal]--;emit(gs,'goal',{slot:goal,lives:gs.lives.slice(),scores:gs.scores.slice(),tick:gs.tick});
-          if(gs.lives[goal]<=0)eliminate(gs,goal,'lives');gs.balls.splice(i,1);queueBall(gs);continue;}}
+          if(!gs.config.activeSlots?.includes(goal)&&gs.config.mode==='duel'){if(goal<2)b.vy=-b.vy;else b.vx=-b.vx;}
+          else applyEliminatedWall(gs,goal,b,gs.config);b.contact=(b.contact||0)+1;
+        }else{gs.scores[goal]++;
+          if(gs.config.mode==='team'){
+            const team=gs.config.teams[goal];gs.teamScores[team]++;gs.teamLives[team]=Math.max(0,20-gs.teamScores[team]);
+            for(const s of gs.config.activeSlots)if(gs.config.teams[s]===team&&!gs.eliminated[s])gs.lives[s]=gs.teamLives[team];
+            if(gs.teamLives[team]===0)for(const s of gs.config.activeSlots)if(gs.config.teams[s]===team)eliminate(gs,s,'team_lives');
+          }else {gs.lives[goal]--;if(gs.lives[goal]<=0)eliminate(gs,goal,'lives');}
+          emit(gs,'goal',{slot:goal,lives:gs.lives.slice(),scores:gs.scores.slice(),tick:gs.tick});
+          gs.balls.splice(i,1);queueBall(gs);continue;}}
       }
     }
     for(const key of Object.keys(b))if(typeof b[key]==='number')b[key]=round(b[key]);
