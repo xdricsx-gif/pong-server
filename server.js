@@ -3,6 +3,7 @@ const { createServer } = require('http');
 const { readFileSync } = require('fs');
 const { join } = require('path');
 const { Server } = require('socket.io');
+const netcode2 = require('./netcode-server');
 const { Pool } = require('pg');
 const { createBillingService, createPublisher, registerBillingHandlers } = require('./play-billing');
 let playBilling = null;
@@ -1279,12 +1280,13 @@ function getSlotPlayer(room, slot) {
   return null;
 }
 
-function findOrCreateRoom() {
+function findOrCreateRoom(protocol = 1) {
   for (const [, r] of rooms) {
-    if ((r.status === 'waiting' || r.status === 'countdown') && Object.keys(r.players).length < 4) return r;
+    if ((r.protocol || 1) === protocol && (r.status === 'waiting' || r.status === 'countdown') && Object.keys(r.players).length < 4) return r;
   }
   const id = 'r_' + Math.random().toString(36).slice(2, 8);
   const room = createRoom(id);
+  room.protocol = protocol;
   rooms.set(id, room);
   return room;
 }
@@ -1953,6 +1955,7 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
 }
 
 function endGame(room, winnerSlot) {
+  if (room.status === 'finished') return;
   const gs = room.game;
   gs.gameOver = true; gs.winner = winnerSlot;
   room.status = 'finished';
@@ -2020,6 +2023,7 @@ function startGame(room) {
     fillBots(room, true);
   }
   room.game = createGameState(room);
+  if (room.protocol === 2) netcode2.prepare(room, {io, getPlayer:getSlotPlayer, endGame, onAbort:id=>rooms.delete(id)});
   // Paddle visual data — передається один раз при старті
   const paddleVisuals = SLOTS.map(s => {
     const p = getSlotPlayer(room, s);
@@ -2039,11 +2043,12 @@ function startGame(room) {
       avgUpgrade: stats.avgUpgrade !== undefined ? Math.round(stats.avgUpgrade * 100) : 0,
     };
   });
-  io.to(room.id).emit('game:start', { players: buildPlayers(room), mySlot: null, roomId: room.id, paddleVisuals });
+  io.to(room.id).emit('game:start', { players: buildPlayers(room), mySlot: null, roomId: room.id, paddleVisuals, netVersion: room.net2 ? netcode2.VERSION : null });
   for (const [sid, player] of Object.entries(room.players)) {
     io.to(sid).emit('myslot', { mySlot: player.slot, roomId: room.id });
+    if (room.net2) netcode2.init(room, io.sockets.sockets.get(sid), player.slot);
   }
-  room.tickInterval = setInterval(() => tick(room), TICK_MS);
+  room.tickInterval = room.net2 ? null : setInterval(() => tick(room), TICK_MS);
   room.startedAt = Date.now(); // для підрахунку тривалості матчу
 
   // ── Аналітика: подія старту матчу (для drop-off rate) ──
@@ -2066,7 +2071,7 @@ function startGame(room) {
   room.matchTimeLeft = MATCH_DURATION_MS;
 
   // Надсилаємо клієнтам кожну секунду
-  room.matchTimerInterval = setInterval(() => {
+  room.matchTimerInterval = room.net2 ? null : setInterval(() => {
     if (room.game?.gameOver) {
       clearInterval(room.matchTimerInterval);
       room.matchTimerInterval = null;
@@ -2236,7 +2241,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('mm:join', async ({ nick, rating, uid, idToken, wins, games, paddleStats, trainingMode, avatarId, platform }) => {
+  socket.on('mm:join', async ({ nick, rating, uid, idToken, wins, games, paddleStats, trainingMode, avatarId, platform, netVersion }) => {
+    if (myRoom && myRoom.status === 'playing') return;
     // ── SECURITY: верифікуємо idToken, витягуємо реальний uid ──
     const verifiedUid = await resolveUid({ idToken, fallbackUid: uid });
     if (admin && !verifiedUid && !trainingMode) {
@@ -2272,7 +2278,8 @@ io.on('connection', (socket) => {
       startGame(tRoom);
       return;
     }
-    const room = findOrCreateRoom();
+    const protocol = netVersion === netcode2.VERSION && process.env.NETCODE_V2 !== '0' ? 2 : 1;
+    const room = findOrCreateRoom(protocol);
     myRoom = room; mySlot = getAvailableSlot(room);
     if (mySlot === undefined) {
       const botSlot = SLOTS.find(s => room.bots[s] && !Object.values(room.players).some(p=>p.slot===s));
@@ -2300,7 +2307,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('rejoin', async ({ roomId, slot, nick, rating, uid, idToken, paddleStats }) => {
+  socket.on('rejoin', async ({ roomId, slot, nick, rating, uid, idToken, paddleStats, netVersion }) => {
     const room = rooms.get(roomId);
     if (!room) { socket.emit('rejoin:fail', { reason: 'room_gone' }); return; }
 
@@ -2318,16 +2325,13 @@ io.on('connection', (socket) => {
     // ── Додатковий захист: слот, який ми відновлюємо, має належати цьому UID ──
     // (щоб не можна було підхопити чужий відключений слот)
     const savedData = room._disconnected && room._disconnected[slot];
+    if (room.net2 && (netVersion !== netcode2.VERSION || !savedData || savedData.leftVoluntarily || !realUid || savedData.uid !== realUid || room.game.eliminated[slot])) {
+      socket.emit('rejoin:fail', {reason:'not_rejoinable'}); return;
+    }
     if (savedData && savedData.uid && realUid && savedData.uid !== realUid) {
       console.log('[rejoin] UID mismatch: slot='+slot+' wants='+realUid+' saved='+savedData.uid);
       socket.emit('rejoin:fail', { reason: 'wrong_uid' });
       return;
-    }
-
-    // ── Відміняємо таймер кіку для цього слоту ──
-    if (room._slotDeleteTimers && room._slotDeleteTimers[slot]) {
-      clearTimeout(room._slotDeleteTimers[slot]);
-      delete room._slotDeleteTimers[slot];
     }
 
     // ── SECURITY: перезавантажуємо paddleStats з БД, не довіряємо клієнту ──
@@ -2342,6 +2346,16 @@ io.on('connection', (socket) => {
     const serverRating = realUid ? await loadValidatedRating(realUid) : (rating|0) || 500;
     if (!socket.connected) return;
 
+    // Async account reads yield: another connection or a match finish may win the race.
+    // Claim a slot only after rechecking; keep its disconnect deadline until then.
+    if (rooms.get(roomId)!==room || !['playing','waiting','countdown'].includes(room.status) ||
+        Object.values(room.players).some(p=>p.slot===slot) ||
+        (room.net2 && (room._disconnected?.[slot]!==savedData || room.game.eliminated[slot]))) {
+      socket.emit('rejoin:fail',{reason:'not_rejoinable'});return;
+    }
+    if (room._slotDeleteTimers?.[slot]) {
+      clearTimeout(room._slotDeleteTimers[slot]);delete room._slotDeleteTimers[slot];
+    }
     if (room._disconnected) delete room._disconnected[slot];
 
     if (realUid) socket.uid = realUid;
@@ -2370,12 +2384,13 @@ io.on('connection', (socket) => {
         };
       });
       socket.emit('rejoin:game', {
-        mySlot: slot, players: buildPlayers(room),
-        gameOver: gs.gameOver, winner: gs.winner,
+        mySlot: slot, roomId: room.id, players: buildPlayers(room), netVersion: room.net2 ? netcode2.VERSION : null,
+        gameOver: room.net2 ? false : gs.gameOver, winner: room.net2 ? null : gs.winner,
         lives: gs.lives, scores: gs.scores,
         paddleVisuals: rejoinPaddleVisuals,
       });
       socket.emit('myslot', { mySlot: slot });
+      if (room.net2) { room.net2.authority.connect(slot); netcode2.init(room, socket, slot); }
     } else if (room.status === 'waiting' || room.status === 'countdown') {
       socket.emit('rejoin:lobby', { mySlot: slot });
       // Якщо countdown вже йде — reconnected клієнту теж надсилаємо поточний час
@@ -2405,7 +2420,23 @@ io.on('connection', (socket) => {
     socket.emit('np', { c: clientT, s: Date.now() });
   });
 
+  socket.on('net:input', packet => netcode2.input(myRoom, socket, packet));
+  socket.on('net:ping', c => {
+    const now=performance.now();if(!Number.isFinite(c)||now-(socket._netPingAt||0)<250)return;
+    socket._netPingAt=now;socket.emit('net:pong',{c,s:now});
+  });
+  socket.on('net:sync', () => netcode2.sync(myRoom, socket, mySlot));
+  socket.on('net:resume', () => {
+    if (!myRoom?.net2 || !myRoom.players[socket.id]) return;
+    const now=Date.now();if(now-(socket._netResumeAt||0)<500)return;socket._netResumeAt=now;
+    myRoom.net2.authority.connect(mySlot);netcode2.init(myRoom,socket,mySlot);
+  });
+  socket.on('net:pause', () => {
+    const now=Date.now();if(now-(socket._netPauseAt||0)<250)return;socket._netPauseAt=now;
+    if(myRoom?.net2 && myRoom.players[socket.id]) myRoom.net2.authority.disconnect(mySlot,false);
+  });
   socket.on('input', ({ left, right, boost, magnet, hist, pos, boostPos, fieldPos }) => {
+    if (myRoom?.net2) return;
     if (!myRoom || !myRoom.players[socket.id]) return;
     const player = myRoom.players[socket.id];
     const gs = myRoom.game;
@@ -2496,6 +2527,21 @@ io.on('connection', (socket) => {
     const pinfo = room.players[socket.id];
     socket.leave(room.id);
 
+    if (room.status === 'playing' && slot !== null && pinfo && room.net2) {
+      room._disconnected ||= {};
+      room._disconnected[slot] = {nick:pinfo.nick,rating:pinfo.rating,uid:pinfo.uid,paddleStats:pinfo.paddleStats,leftVoluntarily:voluntary};
+      netcode2.disconnect(room,socket,slot,voluntary);clearSlotPlayer(room,socket.id);
+      myRoom=null;mySlot=null;
+      if(!voluntary){
+        io.to(room.id).emit('player:disconnected',{slot,reconnectTimeout:30});
+        room._slotDeleteTimers ||= {};
+        room._slotDeleteTimers[slot]=setTimeout(()=>{
+          delete room._slotDeleteTimers[slot];
+          if(room._disconnected?.[slot] && room.status==='playing')room.net2.authority.system({type:'eliminate',slot,reason:'timeout'});
+        },30000);
+      }
+      return;
+    }
     if (room.status === 'playing' && slot !== null && pinfo && room.game && !room.game.gameOver) {
       // ── СТРАТЕГІЯ ──
       // voluntary (натиснув "Вийти") → одразу markEliminated. Блокує експлойт.
@@ -2589,6 +2635,7 @@ setInterval(() => {
     if (!room.game || room.game.gameOver) continue;
     const gs = room.game;
     const now = Date.now();
+    if(room.net2)console.log('[NET2] '+JSON.stringify({room:rid,tick:gs.tick,...room.net2.metrics}));
     const players = Object.values(room.players).map(p => {
       // Отримуємо socket для цього гравця
       const sock = io.sockets.sockets.get(p.id);

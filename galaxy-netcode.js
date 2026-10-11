@@ -1,0 +1,200 @@
+/* Protocol 2: bounded authority rollback and fixed-tick client prediction.
+ * Transport independent; the production adapter uses latest-state Socket.IO packets.
+ * Gameplay effects are provisional. Only onCommit may change UI results or rewards.
+ */
+(function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory(require('./galaxy-physics.js'));
+else root.GalaxyNetcode=factory(root.GalaxyPhysics);})(typeof globalThis!=='undefined'?globalThis:this,function(P){
+'use strict';
+const WINDOW=8,FUTURE=14,MAX_PREDICT=20,HISTORY=64,DT=P.TICK_MS;
+const copy=P.clone,clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+const validInt=x=>Number.isSafeInteger(x)&&x>=0;
+class Authority {
+  constructor({matchId,world,onCommit=()=>{}}){
+    this.matchId=matchId;this.world=P.checkpoint(world);this.onCommit=onCommit;
+    this.history=new Map([[world.tick,P.checkpoint(world)]]);this.events=new Map();
+    this.commands=new Map();this.systems=new Map();this.epochs=[0,0,0,0];this.minTicks=[0,0,0,0];
+    this.seen=P.SLOTS.map(()=>new Map());this.ack=[0,0,0,0];this.dirty=null;
+    this.committed=world.tick;this.revision=0;this.snapshotId=0;this.finished=false;
+    this.metrics={accepted:0,duplicate:0,rejected:0,tooLate:0,rollbacks:0,replayedTicks:0,maxReplay:0};
+  }
+  connect(slot){
+    this.epochs[slot]++;this.seen[slot].clear();this.ack[slot]=0;this.minTicks[slot]=this.world.tick+1;
+    // Clear previously scheduled input; an old connection cannot steer a resumed slot.
+    for(const [tick,list] of this.commands)if(tick>this.world.tick)delete list[slot];
+    this.system({type:'connected',slot,value:true});return this.epochs[slot];
+  }
+  disconnect(slot,voluntary=false){
+    this.epochs[slot]++;this.minTicks[slot]=this.world.tick+1;
+    for(const [tick,list] of this.commands)if(tick>this.world.tick)delete list[slot];
+    this.system({type:'connected',slot,value:false});
+    if(voluntary)this.system({type:'eliminate',slot,reason:'leave'});
+  }
+  system(event){const t=this.world.tick+1;if(!this.systems.has(t))this.systems.set(t,[]);this.systems.get(t).push(copy(event));}
+  receive(slot,packet){
+    if(this.finished||!P.SLOTS.includes(slot)||!packet||packet.matchId!==this.matchId||
+      packet.epoch!==this.epochs[slot]||packet.version!==P.VERSION||!Array.isArray(packet.commands)||packet.commands.length>16){this.metrics.rejected++;return false;}
+    for(const c of packet.commands){
+      if(!c||!validInt(c.seq)||c.seq===0||!validInt(c.tick)||!validInt(c.boost)||c.boost>c.seq||
+        ![-1,0,1].includes(c.dx)||typeof c.magnet!=='boolean'||c.tick>this.world.tick+FUTURE||c.tick<this.minTicks[slot]){this.metrics.rejected++;continue;}
+      const seen=this.seen[slot];if(seen.has(c.seq)){this.metrics.duplicate++;continue;}
+      if(c.tick<=this.committed){this.metrics.tooLate++;continue;}
+      let list=this.commands.get(c.tick);if(!list){list={};this.commands.set(c.tick,list);}
+      // First valid command for a slot/tick is immutable, even across replay.
+      if(list[slot]){this.metrics.rejected++;continue;}
+      list[slot]={seq:c.seq,tick:c.tick,dx:c.dx,boost:c.boost,magnet:c.magnet};
+      seen.set(c.seq,c.tick);this.ack[slot]=Math.max(this.ack[slot],c.seq);this.metrics.accepted++;
+      if(c.tick<=this.world.tick)this.dirty=this.dirty===null?c.tick:Math.min(this.dirty,c.tick);
+    }
+    return true;
+  }
+  simulate(){
+    const t=this.world.tick+1;P.step(this.world,this.commands.get(t)||{},this.systems.get(t)||[]);
+    this.events.set(t,copy(this.world.events));this.history.set(t,P.checkpoint(this.world));
+  }
+  flush(){
+    if(this.dirty===null)return;
+    const end=this.world.tick,start=this.dirty;this.dirty=null;
+    const before=this.history.get(start-1);if(!before)throw Error('Missing rollback checkpoint');
+    this.world=P.checkpoint(before);for(let t=start;t<=end;t++)this.simulate();
+    this.revision++;this.metrics.rollbacks++;this.metrics.replayedTicks+=end-start+1;
+    this.metrics.maxReplay=Math.max(this.metrics.maxReplay,end-start+1);
+  }
+  advance(){
+    if(this.finished)return;this.flush();this.simulate();
+    const target=Math.max(this.committed,this.world.tick-WINDOW);
+    while(this.committed<target){const tick=++this.committed;
+      const events=this.events.get(tick)||[],world=this.history.get(tick);
+      // No external side effect occurs while rewinding. Commit each tick exactly once.
+      this.onCommit({tick,events:copy(events),world:P.checkpoint(world)});
+      if(world.gameOver){this.finished=true;break;}
+    }
+    const cutoff=this.world.tick-HISTORY;
+    for(const map of [this.history,this.events,this.commands,this.systems])for(const t of map.keys())if(t<cutoff)map.delete(t);
+    for(const seen of this.seen)for(const [seq,tick] of seen)if(tick<cutoff)seen.delete(seq);
+  }
+  snapshot(){
+    this.flush();const confirmed=this.history.get(this.committed)||this.world;
+    const scheduled=[];
+    for(const [tick,slots] of this.commands)if(tick>this.world.tick)for(const [slot,command] of Object.entries(slots))scheduled.push({slot:+slot,command:{...command}});
+    return {version:P.VERSION,matchId:this.matchId,id:++this.snapshotId,revision:this.revision,
+      committed:this.committed,epochs:this.epochs.slice(),ack:this.ack.slice(),
+      scheduled,confirmed:{lives:confirmed.lives.slice(),scores:confirmed.scores.slice(),eliminated:confirmed.eliminated.slice()},world:P.checkpoint(this.world)};
+  }
+}
+
+class Client {
+  constructor({slot,matchId,epoch,send=()=>{},requestSync=()=>{}}){
+    this.slot=slot;this.matchId=matchId;this.epoch=epoch;this.send=send;this.requestSync=requestSync;
+    this.world=null;this.previous=null;this.base=null;this.latestId=-1;this.seq=0;this.boost=0;
+    this.pending=new Map();this.input={dx:0,magnet:false};this.boostQueued=false;
+    this.anchorTime=0;this.anchorTick=0;this.rtt=100;this.lastReceived=0;this.lastSent=-Infinity;
+    this.clockOffset=null;this.clockSamples=[];this.hasAnchor=false;this.lastCorrection=[];
+    this.remoteCommands=new Map();
+    this.lastSyncRequest=-Infinity;this.resumeRequested=false;
+    this.paused=false;this.needsSync=false;this.corrections=new Map();
+    this.metrics={snapshots:0,staleSnapshots:0,reconciliations:0,softCorrections:0,hardCorrections:0,
+      maxCorrection:0,predictionStops:0,maxPending:0};
+  }
+  setInput({dx=0,magnet=false,boost=false}){
+    this.input={dx:clamp(dx,-1,1),magnet:!!magnet};if(boost)this.boostQueued=true;
+  }
+  setRtt(ms){if(Number.isFinite(ms)&&ms>=0&&ms<3000)this.rtt=clamp(ms,0,400);}
+  clockSample({c,s},now){
+    if(!Number.isFinite(c)||!Number.isFinite(s)||now<c||now-c>3000)return;
+    const rtt=now-c;this.clockSamples.push({rtt,offset:s-(c+now)/2});
+    if(this.clockSamples.length>12)this.clockSamples.shift();
+    const best=this.clockSamples.reduce((a,b)=>a.rtt<b.rtt?a:b);
+    this.clockOffset=best.offset;this.setRtt(this.rtt*.8+rtt*.2);
+  }
+  suspend(){this.paused=true;this.input={dx:0,magnet:false};this.boostQueued=false;this.needsSync=true;}
+  resume(){this.paused=false;this.pending.clear();this.boostQueued=false;this.needsSync=true;this.resumeRequested=true;this.requestSync(true);}
+  receive(packet,now){
+    if(!packet||packet.version!==P.VERSION||packet.matchId!==this.matchId||packet.id<=this.latestId){this.metrics.staleSnapshots++;return false;}
+    if(packet.epochs[this.slot]!==this.epoch)return false;
+    if(packet.world.tick<this.base?.tick){this.metrics.staleSnapshots++;return false;}
+    const before=this.world?P.checkpoint(this.world):null,oldTick=before?.tick||packet.world.tick;
+    const priorEstimate=this.anchorTick+(now-this.anchorTime)/DT;
+    const resync=this.needsSync;
+    this.latestId=packet.id;this.base=P.checkpoint(packet.world);this.confirmed=copy(packet.confirmed);this.lastReceived=now;
+    const age=this.clockOffset!==null&&Number.isFinite(packet.sentAt)?clamp(now+this.clockOffset-packet.sentAt,0,500):this.rtt/2;
+    const estimate=this.base.tick+age/DT+(packet.phase||0);
+    this.anchorTick=this.hasAnchor&&!resync&&Math.abs(estimate-priorEstimate)<6?priorEstimate+clamp(estimate-priorEstimate,-.12,.12):estimate;
+    this.anchorTime=now;this.hasAnchor=true;
+    this.world=P.checkpoint(this.base);this.previous=P.checkpoint(this.base);
+    this.remoteCommands.clear();
+    for(const {slot,command} of packet.scheduled||[]){
+      if(slot===this.slot)continue;
+      if(!this.remoteCommands.has(command.tick))this.remoteCommands.set(command.tick,{});
+      this.remoteCommands.get(command.tick)[slot]=command;
+    }
+    this.boost=Math.max(this.boost,this.world.lastBoost[this.slot]);
+    this.seq=Math.max(this.seq,this.boost);this.metrics.snapshots++;
+    // A recent server snapshot can precede receipt of our uplink. Keep redundant
+    // commands until committed, otherwise one dropped packet can lose a button edge.
+    for(const [tick] of this.pending)if(tick<=packet.committed)this.pending.delete(tick);
+    const target=Math.min(Math.max(oldTick,this.base.tick),this.base.tick+MAX_PREDICT);
+    for(let t=this.base.tick+1;t<=target;t++){
+      this.previous=P.checkpoint(this.world);const c=this.pending.get(t);
+      P.step(this.world,{...this.remoteCommands.get(t),...(c?{[this.slot]:c}:{})});
+    }
+    this.needsSync=false;
+    this.resumeRequested=false;
+    this.lastCorrection=[];
+    const priorCorrections=this.corrections;this.corrections=new Map();
+    if(before&&before.tick===this.world.tick){this.metrics.reconciliations++;
+      for(const b of this.world.balls){const old=before.balls.find(x=>x.id===b.id);if(!old)continue;
+        const dx=old.x-b.x,dy=old.y-b.y,d=Math.hypot(dx,dy);this.metrics.maxCorrection=Math.max(this.metrics.maxCorrection,d);
+        this.lastCorrection.push(d);
+        const prior=priorCorrections.get(b.id);
+        const k=prior&&prior.contact===old.contact?clamp(1-(now-prior.time)/80,0,1):0;
+        const visualDx=dx+(k?prior.dx*k:0),visualDy=dy+(k?prior.dy*k:0);
+        // Do not smooth across a changed bounce or through a paddle/force field.
+        const safe=old.contact===b.contact&&b.x>130&&b.x<390&&b.y>130&&b.y<390&&d<24&&Math.hypot(visualDx,visualDy)<24&&old.vx*b.vx+old.vy*b.vy>=0;
+        if(safe&&d<.05&&k){this.corrections.set(b.id,prior);}
+        else if(safe&&d>=.05){this.corrections.set(b.id,{dx:visualDx,dy:visualDy,time:now,contact:b.contact});this.metrics.softCorrections++;}
+        else if(d>=.05)this.metrics.hardCorrections++;
+      }
+    }
+    return true;
+  }
+  // A small fixed input lead keeps the predicted contact horizon short.
+  // The bounded server rewind absorbs delayed uplink instead of predicting a full RTT ahead.
+  desiredTick(now){return this.anchorTick+(now-this.anchorTime)/DT+2+Math.ceil(Math.max(0,this.rtt-140)/(2*DT));}
+  advance(now){
+    if(!this.world||this.paused)return;
+    if(this.needsSync){if(now-this.lastSyncRequest>=1000){this.lastSyncRequest=now;this.requestSync(this.resumeRequested);}return;}
+    // A long outage suspends prediction instead of inventing seconds of collisions.
+    if(now-this.lastReceived>400){if(!this.needsSync){this.metrics.predictionStops++;this.needsSync=true;this.requestSync();}return;}
+    const target=Math.min(Math.floor(this.desiredTick(now)),this.base.tick+MAX_PREDICT);
+    let steps=0;
+    while(this.world.tick<target&&steps++<MAX_PREDICT){
+      const t=this.world.tick+1;
+      let c=this.pending.get(t);
+      if(!c){const seq=++this.seq;if(this.boostQueued){this.boost=seq;this.boostQueued=false;}
+        c={tick:t,seq,dx:this.input.dx,magnet:this.input.magnet,boost:this.boost};this.pending.set(t,c);}
+      this.previous=P.checkpoint(this.world);P.step(this.world,{...this.remoteCommands.get(t),[this.slot]:c});
+    }
+    this.metrics.maxPending=Math.max(this.metrics.maxPending,this.pending.size);
+    if(now-this.lastSent>=DT*1.5){
+      const commands=[...this.pending.values()].slice(-16);
+      if(commands.length)this.send({version:P.VERSION,matchId:this.matchId,epoch:this.epoch,commands});
+      this.lastSent=now;
+    }
+  }
+  sample(now){
+    if(!this.world)return null;
+    const w=P.checkpoint(this.world),prev=this.previous||w;
+    const target=this.desiredTick(now),alpha=this.needsSync||this.paused?1:clamp(target-Math.floor(target),0,1);
+    // One coherent timeline for paddles, held balls, fields and free balls.
+    for(const s of P.SLOTS)w.paddles[s]=prev.paddles[s]+(w.paddles[s]-prev.paddles[s])*alpha;
+    for(const b of w.balls){const old=prev.balls.find(x=>x.id===b.id),held=P.SLOTS.find(s=>b['mag_held_'+s]);
+      if(held!==undefined){const p=P.slotToPaddle(held,w.paddles[held],w,w.config);b.x=p.x+p.w/2+(b['mag_offX_'+held]||0);b.y=p.y+p.h/2+(b['mag_offY_'+held]||0);}
+      else if(old&&old.contact===b.contact){b.x=old.x+(b.x-old.x)*alpha;b.y=old.y+(b.y-old.y)*alpha;}
+      const correction=this.corrections.get(b.id);if(correction){const k=clamp(1-(now-correction.time)/80,0,1);
+        if(k&&held===undefined&&correction.contact===b.contact&&b.x>130&&b.x<390&&b.y>130&&b.y<390){b.x+=correction.dx*k;b.y+=correction.dy*k;}else this.corrections.delete(b.id);}
+    }
+    return w;
+  }
+}
+return {Authority,Client,WINDOW,FUTURE,MAX_PREDICT,HISTORY};
+});
