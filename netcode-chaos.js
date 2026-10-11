@@ -46,6 +46,10 @@ function run({rtt=100,jitter=15,loss=.02,ordered=true,burst=false,asymmetric=fal
   }
   assert.equal(new Set(commits).size,commits.length);assert.ok(a.history.size<=HISTORY+1);
   // An authoritative recovery snapshot must converge, including PRNG and all magnet flags.
+  // Finish the uplink and let it commit before comparing immutable recovery state.
+  // A provisional snapshot is deliberately NOT allowed to erase unresolved local input.
+  for(const c of clients)a.receive(c.slot,{version:P.VERSION,matchId:a.matchId,epoch:c.epoch,commands:[...c.pending.values()].slice(-16)});
+  for(let t=0;t<30;t++)a.advance();
   const final=packet();for(const c of clients){c.world=null;c.receive(final,now);assert.equal(P.hash(c.world),P.hash(a.world));}
   return {rtt,jitter,loss,ordered,burst,asymmetric,fps,seed,durationMs:duration,
     correctionPx:{p50:percentile(corrections,.5),p95:percentile(corrections,.95),p99:percentile(corrections,.99),max:percentile(corrections,1)},

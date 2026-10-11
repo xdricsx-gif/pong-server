@@ -1,6 +1,14 @@
 # Galaxy Football network protocol 2
 
-Implemented locally for Android 20.6 (versionCode 26), 2026-10-11. This document does not record a production deployment.
+Updated for Android 20.7 (versionCode 27), 2026-10-11. Deployment status is recorded separately.
+
+## 20.7 local input correction
+
+Protocol `gf-net2-2` includes a committed world checkpoint plus the accepted input/system-event timeline for the provisional window in every self-contained snapshot. Clients replay the entire world from this checkpoint, overlaying unresolved local input only where the server has not accepted a command for that slot/tick. This fixes an own-paddle rewind when a snapshot crossed input ticks whose uplink had not arrived yet. Accepted commands win conflicts; committed deadlines still discard input too late for fairness. Fresh connections advance sequence/boost counters past the authoritative acknowledgements.
+
+The original latest-world checkpoint remains the clock reference and prediction bound. The renderer does not graft an independent local paddle onto a different ball/field timeline. Diagnostics now record own-paddle corrections and replayed local past inputs. Protocol versions are separated by matchmaking; 20.6 falls back to its retained legacy path after this server update.
+
+Regression tests cover moving field and magnet contacts with four balls, immutable conflicts, commit deadlines, reconnection events, full wire roundtrips and obsolete versions. Four-client simulations at 70/100/150 ms RTT with seed 42 eliminated the reproduced own-paddle jump in the 30-second scenarios; this is simulation evidence, not a device/network guarantee. Remote inputs can still cause ball corrections. The current sandbox blocks local socket connections, so the real Socket.IO integration run timed out; it was not counted as passing.
 
 ## Problem and model
 

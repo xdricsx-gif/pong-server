@@ -108,7 +108,7 @@ test('wire compression roundtrip preserves all physics and command state exactly
   for(let t=1;t<1800;t++){
     send(a,0,cmd(t,(t%3)-1,Math.floor(t/20),t%70<30));a.advance();
     if(t%60===0){const p=a.snapshot(),decoded=Wire.readSnapshot(Wire.snapshot(p),p.world.config);
-      assert.deepEqual(decoded.world,p.world);assert.deepEqual(decoded.scheduled,p.scheduled);
+      assert.deepEqual(decoded.world,p.world);assert.deepEqual(decoded.scheduled,p.scheduled);assert.deepEqual(decoded.replay,p.replay);
       const input={version:P.VERSION,matchId:'test',epoch:0,commands:[cmd(t,1,3,true)]};
       assert.deepEqual(Wire.readInput(Wire.input(input)),input);
     }

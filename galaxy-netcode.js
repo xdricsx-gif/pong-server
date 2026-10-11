@@ -74,11 +74,14 @@ class Authority {
   }
   snapshot(){
     this.flush();const confirmed=this.history.get(this.committed)||this.world;
-    const scheduled=[];
+    const scheduled=[],replayCommands=[],replaySystems=[];
     for(const [tick,slots] of this.commands)if(tick>this.world.tick)for(const [slot,command] of Object.entries(slots))scheduled.push({slot:+slot,command:{...command}});
+    for(const [tick,slots] of this.commands)if(tick>this.committed)for(const [slot,command] of Object.entries(slots))replayCommands.push({slot:+slot,command:{...command}});
+    for(const [tick,events] of this.systems)if(tick>this.committed)replaySystems.push({tick,events:copy(events)});
     return {version:P.VERSION,matchId:this.matchId,id:++this.snapshotId,revision:this.revision,
       committed:this.committed,epochs:this.epochs.slice(),ack:this.ack.slice(),
-      scheduled,confirmed:{lives:confirmed.lives.slice(),scores:confirmed.scores.slice(),eliminated:confirmed.eliminated.slice()},world:P.checkpoint(this.world)};
+      scheduled,replay:{world:P.checkpoint(confirmed),commands:replayCommands,systems:replaySystems},
+      confirmed:{lives:confirmed.lives.slice(),scores:confirmed.scores.slice(),eliminated:confirmed.eliminated.slice()},world:P.checkpoint(this.world)};
   }
 }
 
@@ -89,11 +92,11 @@ class Client {
     this.pending=new Map();this.input={dx:0,magnet:false};this.boostQueued=false;
     this.anchorTime=0;this.anchorTick=0;this.rtt=100;this.lastReceived=0;this.lastSent=-Infinity;
     this.clockOffset=null;this.clockSamples=[];this.hasAnchor=false;this.lastCorrection=[];
-    this.remoteCommands=new Map();
+    this.remoteCommands=new Map();this.systemEvents=new Map();
     this.lastSyncRequest=-Infinity;this.resumeRequested=false;
     this.paused=false;this.needsSync=false;this.corrections=new Map();
     this.metrics={snapshots:0,staleSnapshots:0,reconciliations:0,softCorrections:0,hardCorrections:0,
-      maxCorrection:0,predictionStops:0,maxPending:0};
+      maxCorrection:0,predictionStops:0,maxPending:0,ownPaddleCorrections:0,maxOwnPaddleCorrection:0,replayedLocalPastInputs:0};
   }
   setInput({dx=0,magnet=false,boost=false}){
     this.input={dx:clamp(dx,-1,1),magnet:!!magnet};if(boost)this.boostQueued=true;
@@ -108,10 +111,17 @@ class Client {
   }
   suspend(){this.paused=true;this.input={dx:0,magnet:false};this.boostQueued=false;this.needsSync=true;}
   resume(){this.paused=false;this.pending.clear();this.boostQueued=false;this.needsSync=true;this.resumeRequested=true;this.requestSync(true);}
+  commandsAt(tick){
+    const accepted=this.remoteCommands.get(tick)||{},local=this.pending.get(tick);
+    // The server's immutable accepted command wins any same-tick conflict.
+    // Otherwise retain our unconfirmed command, including ticks before the latest snapshot.
+    return local&&!accepted[this.slot]?{...accepted,[this.slot]:local}:accepted;
+  }
   receive(packet,now){
     if(!packet||packet.version!==P.VERSION||packet.matchId!==this.matchId||packet.id<=this.latestId){this.metrics.staleSnapshots++;return false;}
     if(packet.epochs[this.slot]!==this.epoch)return false;
     if(packet.world.tick<this.base?.tick){this.metrics.staleSnapshots++;return false;}
+    if(!packet.replay||packet.replay.world.tick!==packet.committed||packet.committed>packet.world.tick||packet.world.tick-packet.committed>WINDOW)return false;
     const before=this.world?P.checkpoint(this.world):null,oldTick=before?.tick||packet.world.tick;
     const priorEstimate=this.anchorTick+(now-this.anchorTime)/DT;
     const resync=this.needsSync;
@@ -120,28 +130,36 @@ class Client {
     const estimate=this.base.tick+age/DT+(packet.phase||0);
     this.anchorTick=this.hasAnchor&&!resync&&Math.abs(estimate-priorEstimate)<6?priorEstimate+clamp(estimate-priorEstimate,-.12,.12):estimate;
     this.anchorTime=now;this.hasAnchor=true;
-    this.world=P.checkpoint(this.base);this.previous=P.checkpoint(this.base);
+    // A provisional latest snapshot may not include our delayed uplink yet.
+    // Start at the immutable checkpoint and replay the ENTIRE world with the known
+    // accepted timeline plus our unresolved input. Never graft just a paddle position.
+    this.world=P.checkpoint(packet.replay.world);this.previous=P.checkpoint(this.world);
     this.remoteCommands.clear();
-    for(const {slot,command} of packet.scheduled||[]){
-      if(slot===this.slot)continue;
+    this.systemEvents.clear();
+    for(const {slot,command} of packet.replay.commands){
       if(!this.remoteCommands.has(command.tick))this.remoteCommands.set(command.tick,{});
       this.remoteCommands.get(command.tick)[slot]=command;
     }
-    this.boost=Math.max(this.boost,this.world.lastBoost[this.slot]);
-    this.seq=Math.max(this.seq,this.boost);this.metrics.snapshots++;
+    for(const {tick,events} of packet.replay.systems)this.systemEvents.set(tick,events);
+    this.boost=Math.max(this.boost,this.base.lastBoost[this.slot]);
+    this.seq=Math.max(this.seq,this.boost,packet.ack[this.slot]);this.metrics.snapshots++;
     // A recent server snapshot can precede receipt of our uplink. Keep redundant
     // commands until committed, otherwise one dropped packet can lose a button edge.
     for(const [tick] of this.pending)if(tick<=packet.committed)this.pending.delete(tick);
     const target=Math.min(Math.max(oldTick,this.base.tick),this.base.tick+MAX_PREDICT);
-    for(let t=this.base.tick+1;t<=target;t++){
+    for(let t=this.world.tick+1;t<=target;t++){
       this.previous=P.checkpoint(this.world);const c=this.pending.get(t);
-      P.step(this.world,{...this.remoteCommands.get(t),...(c?{[this.slot]:c}:{})});
+      if(c&&t<=this.base.tick&&!this.remoteCommands.get(t)?.[this.slot])this.metrics.replayedLocalPastInputs++;
+      P.step(this.world,this.commandsAt(t),this.systemEvents.get(t)||[]);
     }
     this.needsSync=false;
     this.resumeRequested=false;
     this.lastCorrection=[];
     const priorCorrections=this.corrections;this.corrections=new Map();
     if(before&&before.tick===this.world.tick){this.metrics.reconciliations++;
+      const own=Math.abs(before.paddles[this.slot]-this.world.paddles[this.slot]);
+      if(own>=.05)this.metrics.ownPaddleCorrections++;
+      this.metrics.maxOwnPaddleCorrection=Math.max(this.metrics.maxOwnPaddleCorrection,own);
       for(const b of this.world.balls){const old=before.balls.find(x=>x.id===b.id);if(!old)continue;
         const dx=old.x-b.x,dy=old.y-b.y,d=Math.hypot(dx,dy);this.metrics.maxCorrection=Math.max(this.metrics.maxCorrection,d);
         this.lastCorrection.push(d);
@@ -172,7 +190,7 @@ class Client {
       let c=this.pending.get(t);
       if(!c){const seq=++this.seq;if(this.boostQueued){this.boost=seq;this.boostQueued=false;}
         c={tick:t,seq,dx:this.input.dx,magnet:this.input.magnet,boost:this.boost};this.pending.set(t,c);}
-      this.previous=P.checkpoint(this.world);P.step(this.world,{...this.remoteCommands.get(t),[this.slot]:c});
+      this.previous=P.checkpoint(this.world);P.step(this.world,this.commandsAt(t),this.systemEvents.get(t)||[]);
     }
     this.metrics.maxPending=Math.max(this.metrics.maxPending,this.pending.size);
     if(now-this.lastSent>=DT*1.5){
@@ -184,7 +202,7 @@ class Client {
   sample(now){
     if(!this.world)return null;
     const w=P.checkpoint(this.world),prev=this.previous||w;
-    const target=this.desiredTick(now),alpha=this.needsSync||this.paused?1:clamp(target-Math.floor(target),0,1);
+    const target=this.desiredTick(now),alpha=this.needsSync||this.paused?1:clamp(target-w.tick,0,1);
     // One coherent timeline for paddles, held balls, fields and free balls.
     for(const s of P.SLOTS)w.paddles[s]=prev.paddles[s]+(w.paddles[s]-prev.paddles[s])*alpha;
     for(const b of w.balls){const old=prev.balls.find(x=>x.id===b.id),held=P.SLOTS.find(s=>b['mag_held_'+s]);
