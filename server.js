@@ -4,7 +4,8 @@ const { readFileSync } = require('fs');
 const { join } = require('path');
 const { Server } = require('socket.io');
 const netcode2 = require('./netcode-server');
-console.log('[Netcode] '+netcode2.VERSION);
+const {createMatchService}=require('./match-service');
+let matchService;
 const { Pool } = require('pg');
 const { createBillingService, createPublisher, registerBillingHandlers } = require('./play-billing');
 let playBilling = null;
@@ -160,7 +161,7 @@ async function trackGameEnd(room, winnerSlot, places, isTraining, ratingDeltas =
     const durationSec = room.startedAt ? Math.round((Date.now() - room.startedAt) / 1000) : null;
     const botsCount = Object.keys(room.bots || {}).filter(s => room.bots[s]).length;
     const playersCount = Object.keys(room.players).length;
-    const mode = isTraining ? 'training' : (botsCount > 0 ? 'ranked_bots' : 'ranked');
+    const mode = room.mode || (isTraining ? 'training' : (botsCount > 0 ? 'ranked_bots' : 'ranked'));
     const gs = room.game;
 
     // Збираємо учасників: активні + ті, хто вийшов/відключився (uid у _disconnected)
@@ -182,16 +183,16 @@ async function trackGameEnd(room, winnerSlot, places, isTraining, ratingDeltas =
 
     const playerOps = [];
     for (const p of participants) {
-      const placeIdx = places.indexOf(p.slot);
-      const goalsConceded = gs ? (ML - (gs.lives?.[p.slot] ?? ML)) : null;
+      const placeIdx = room.managed ? room.result?.rewards?.[p.slot]?.place ?? -1 : places.indexOf(p.slot);
+      const goalsConceded = gs?.scores?.[p.slot] ?? null;
       const ratingDelta = ratingDeltas[p.slot] != null ? ratingDeltas[p.slot] : null;
-      const newRating = (typeof p.rating === 'number' && ratingDelta != null)
+      const newRating = (mode === 'ranked' && typeof p.rating === 'number' && ratingDelta != null)
         ? Math.max(0, p.rating + ratingDelta)
         : null;
 
       playerOps.push(trackEvent('game_end', {
         uid: p.uid, roomId: room.id, mode,
-        place: placeIdx + 1, durationSec,
+        place: placeIdx < 0 ? null : placeIdx + 1, durationSec,
         botsCount, playersCount, goalsConceded,
         ratingDelta,
       }));
@@ -1305,7 +1306,7 @@ function fillBots(room, isRanked = false) {
   // Середній рейтинг реальних гравців для калібровки ботів
   const realPlayers = Object.values(room.players);
   const avgRating = realPlayers.length
-    ? Math.round(realPlayers.reduce((s, p) => s + (p.rating || 500), 0) / realPlayers.length)
+    ? Math.round(realPlayers.reduce((s, p) => s + (p.rating ?? 500), 0) / realPlayers.length)
     : 500;
   for (const s of SLOTS) {
     if (!taken.includes(s) && !disconnectedSlots.includes(s)) {
@@ -1872,11 +1873,9 @@ function broadcastState(room, sendBalls=true) {
   });
 }
 
-function getTrainingRewards(winnerSlot, mySlot) {
-  const place = mySlot === winnerSlot ? 0 : 1;
-  const xpMap = [60, 30, 15, 5];
-  const silverMap = [80, 40, 20, 5];
-  return { xp: xpMap[place]||5, silver: silverMap[place]||5, place };
+function getTrainingRewards(winnerSlot, mySlot, places) {
+  const place = places.indexOf(mySlot);
+  return { xp: [150,75,30,0][place]||0, silver: [1500,700,200,0][place]||0, place };
 }
 
 // ── Записуємо нагороди через Admin SDK (сервер авторитетний) ──
@@ -1894,7 +1893,7 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
 
   for (const [sid, player] of Object.entries(room.players)) {
     if (!player.uid || player.isBot) continue;
-    participants.push({ uid: player.uid, slot: player.slot, rating: player.rating || 500 });
+    participants.push({ uid: player.uid, slot: player.slot, rating: player.rating ?? 500 });
     claimedSlots.add(player.slot);
   }
   if (room._disconnected) {
@@ -1902,7 +1901,7 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
       const slot = parseInt(slotStr);
       if (claimedSlots.has(slot)) continue; // активний гравець вже взятий
       if (!info || !info.uid) continue;
-      participants.push({ uid: info.uid, slot, rating: info.rating || 500 });
+      participants.push({ uid: info.uid, slot, rating: info.rating ?? 500 });
       claimedSlots.add(slot);
     }
   }
@@ -1915,7 +1914,7 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
     if (isTraining) {
       const tr = trainingRewards;
       if (!tr) continue;
-      const place = s === winnerSlot ? 0 : 1;
+      const place = places.indexOf(s);
       const XP_MAP = [150, 75, 30, 0];
       const SIL_MAP = [1500, 700, 200, 0];
       const xp = XP_MAP[place] || 0;
@@ -1937,7 +1936,7 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
         gamesPlayed: admin.firestore.FieldValue.increment(1),
         ratingDate: today,
       };
-      if (delta > 0) pubUpd.wins = admin.firestore.FieldValue.increment(1);
+      if (placeIdx === 0) pubUpd.wins = admin.firestore.FieldValue.increment(1);
       pubUpd.ratingToday = admin.firestore.FieldValue.increment(delta);
 
       batch.update(pubRef, pubUpd);
@@ -1956,6 +1955,7 @@ async function commitRewards(room, winnerSlot, places, ratingDeltas, isTraining,
 }
 
 function endGame(room, winnerSlot) {
+  if(room.managed){void matchService.finish(room);return;}
   if (room.status === 'finished') return;
   const gs = room.game;
   gs.gameOver = true; gs.winner = winnerSlot;
@@ -1994,7 +1994,7 @@ function endGame(room, winnerSlot) {
   let trainingRewards = null;
   if(isTraining){
     const realPlayer = Object.values(room.players).find(p=>p.trainingMode);
-    if(realPlayer) trainingRewards = getTrainingRewards(winnerSlot, realPlayer.slot);
+    if(realPlayer) trainingRewards = getTrainingRewards(winnerSlot, realPlayer.slot, places);
   }
 
   // Записуємо нагороди на сервері — клієнт більше не пише рейтинг/XP/срібло після матчу
@@ -2004,6 +2004,7 @@ function endGame(room, winnerSlot) {
   footballDashboard?.match(room, isTraining);
 
   io.to(room.id).emit('game:over', {
+    roomId:room.id, scores:SLOTS.map(s=>gs.scores[s]), lives:SLOTS.map(s=>gs.lives[s]),
     winnerSlot, players: buildPlayers(room),
     ratingDeltas: isTraining ? {} : ratingDeltas,
     places, trainingRewards,
@@ -2016,15 +2017,15 @@ function endGame(room, winnerSlot) {
 function startGame(room) {
   room.status = 'playing';
   // Боти тільки для тренування — в рейтингових грають тільки реальні гравці
-  const isTrainingRoom = Object.values(room.players).some(p => p.trainingMode);
+  const isTrainingRoom = room.mode==='training'||Object.values(room.players).some(p => p.trainingMode);
   if (isTrainingRoom) {
     fillBots(room, false);
-  } else {
+  } else if(!room.managed) {
     // Ranked — заповнюємо порожні слоти ranked-ботами
     fillBots(room, true);
   }
   room.game = createGameState(room);
-  if (room.protocol === 2) netcode2.prepare(room, {io, getPlayer:getSlotPlayer, endGame, onAbort:id=>rooms.delete(id)});
+  if (room.protocol === 2) netcode2.prepare(room, {io, getPlayer:getSlotPlayer, endGame, onAbort:id=>{if(room.managed)void matchService.abort(room,'simulation_unavailable');else rooms.delete(id);}});
   // Paddle visual data — передається один раз при старті
   const paddleVisuals = SLOTS.map(s => {
     const p = getSlotPlayer(room, s);
@@ -2044,7 +2045,8 @@ function startGame(room) {
       avgUpgrade: stats.avgUpgrade !== undefined ? Math.round(stats.avgUpgrade * 100) : 0,
     };
   });
-  io.to(room.id).emit('game:start', { players: buildPlayers(room), mySlot: null, roomId: room.id, paddleVisuals, netVersion: room.net2 ? netcode2.VERSION : null });
+  room.paddleVisuals=paddleVisuals;
+  io.to(room.id).emit('game:start', { players: buildPlayers(room), mySlot: null, roomId: room.id, paddleVisuals, matchInfo:room.managed?matchService.info(room):null, netVersion: room.net2 ? netcode2.VERSION : null });
   for (const [sid, player] of Object.entries(room.players)) {
     io.to(sid).emit('myslot', { mySlot: player.slot, roomId: room.id });
     if (room.net2) netcode2.init(room, io.sockets.sockets.get(sid), player.slot);
@@ -2057,7 +2059,7 @@ function startGame(room) {
     const botsCount = Object.keys(room.bots || {}).filter(s => room.bots[s]).length;
     const realPlayersCount = Object.keys(room.players).length;
     const isTrainingRoom = Object.values(room.players).some(p => p.trainingMode);
-    const mode = isTrainingRoom ? 'training' : (botsCount > 0 ? 'ranked_bots' : 'ranked');
+    const mode = room.mode || (isTrainingRoom ? 'training' : (botsCount > 0 ? 'ranked_bots' : 'ranked'));
     for (const player of Object.values(room.players)) {
       if (!player.uid) continue;
       trackEvent('match_start', {
@@ -2154,8 +2156,8 @@ io.on('connection', (socket) => {
 
   // ── Обмін золото → срібло ──
   socket.on('shop:exchange', async ({ rateId }) => {
-    if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
-    if (!socket.uid) return socket.emit('shop:error', { msg: 'auth_required' });
+    if (!db) return socket.emit('shop:error', { operation:'exchange', msg: 'server_unavailable' });
+    if (!socket.uid) return socket.emit('shop:error', { operation:'exchange', msg: 'auth_required' });
     const RATES = [
       { goldIn:1,   silverOut:100   },
       { goldIn:5,   silverOut:500   },
@@ -2163,8 +2165,8 @@ io.on('connection', (socket) => {
       { goldIn:50,  silverOut:5000  },
       { goldIn:100, silverOut:10000 },
     ];
-    const rate = RATES[parseInt(rateId)];
-    if (!rate) return socket.emit('shop:error', { msg: 'invalid_rate' });
+    const rate = Number.isInteger(rateId) ? RATES[rateId] : null;
+    if (!rate) return socket.emit('shop:error', { operation:'exchange', msg: 'invalid_rate' });
 
     const privRef = db.collection('users_private').doc(socket.uid);
 
@@ -2181,7 +2183,7 @@ io.on('connection', (socket) => {
         const newGold   = gold   - rate.goldIn;
         const newSilver = silver + rate.silverOut;
         tx.update(privRef, { gold: newGold, silver: newSilver });
-        return { gold: newGold, silver: newSilver };
+        return { gold: newGold, silver: newSilver, rateId, silverGained:rate.silverOut, goldSpent:rate.goldIn };
       });
 
       socket.emit('shop:exchanged', result);
@@ -2190,9 +2192,9 @@ io.on('connection', (socket) => {
         amount: rate.goldIn, cur: 'gold',
       });
     } catch(e) {
-      if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
+      if (e && e.code) { socket.emit('shop:error', { operation:'exchange', msg: e.code }); return; }
       console.error('shop:exchange', e.message);
-      socket.emit('shop:error', { msg: 'server_error' });
+      socket.emit('shop:error', { operation:'exchange', msg: 'server_error' });
     }
   });
 
@@ -2216,7 +2218,7 @@ io.on('connection', (socket) => {
         const pub = pubSnap.data();
 
         if (type === 'ranked') {
-          const newRating = Math.max(0, (pub.rating || 500) + delta);
+          const newRating = Math.max(0, (pub.rating ?? 500) + delta);
           const newRatingToday = (pub.ratingToday || 0) + delta;
           const newGamesPlayed = (pub.gamesPlayed || 0) + 1;
           tx.update(pubRef, {
@@ -2630,6 +2632,10 @@ io.on('connection', (socket) => {
   }
 });
 
+matchService=createMatchService({io,rooms,createRoom,setPlayer:setSlotPlayer,clearPlayer:clearSlotPlayer,getPlayer:getSlotPlayer,startGame,net:netcode2,getDb:()=>db,authenticate:resolveUid,loadStats:loadValidatedPaddleStats,onSettled:(room,result)=>{
+  if(!result.aborted){const deltas=Object.fromEntries(Object.entries(result.rewards).map(([slot,r])=>[slot,r.ratingDelta]));void trackGameEnd(room,result.winnerSlot,result.places,room.mode==='training',deltas);footballDashboard?.match(room,room.mode==='training');}
+}});
+io.on('connection',socket=>matchService.attach(socket));
 httpServer.listen(PORT, () => console.log(`Server on port ${PORT}, ${TICK_RATE} ticks/sec`));
 
 // ── Лог активних кімнат кожні 30с ──
@@ -2881,8 +2887,8 @@ function registerShopHandlers(socket) {
 
   // ── Купівля енергії ──
   socket.on('shop:buy_energy', async () => {
-    if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
-    if (!socket.uid) return socket.emit('shop:error', { msg: 'auth_required' });
+    if (!db) return socket.emit('shop:error', { operation:'energy', msg: 'server_unavailable' });
+    if (!socket.uid) return socket.emit('shop:error', { operation:'energy', msg: 'auth_required' });
     const privRef = db.collection('users_private').doc(socket.uid);
 
     try {
@@ -2914,9 +2920,9 @@ function registerShopHandlers(socket) {
         amount: ENERGY_GOLD_COST_SRV, cur: 'gold',
       });
     } catch(e) {
-      if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
+      if (e && e.code) { socket.emit('shop:error', { operation:'energy', msg: e.code }); return; }
       console.error('shop:buy_energy', e.message);
-      socket.emit('shop:error', { msg: 'server_error' });
+      socket.emit('shop:error', { operation:'energy', msg: 'server_error' });
     }
   });
 

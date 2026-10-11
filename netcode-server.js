@@ -41,8 +41,7 @@ function makeWorker(){
     const index=pool.indexOf(worker);if(index>=0)pool.splice(index,1);
     // Never manufacture a winner/rewards after losing authoritative simulation.
     for(const id of worker.matchIds){const net=matches.get(id);if(!net)continue;
-      net.room.status='finished';net.room.game.gameOver=true;
-      net.io.to(id).emit('net:aborted',{reason:'simulation_unavailable'});
+      if(!net.room.managed){net.room.status='finished';net.room.game.gameOver=true;net.io.to(id).emit('net:aborted',{reason:'simulation_unavailable'});}
       for(const timer of Object.values(net.room._slotDeleteTimers||{}))clearTimeout(timer);
       matches.delete(id);net.onAbort?.(id);
     }
@@ -57,7 +56,7 @@ function prepare(room,{io,getPlayer,endGame,onAbort}){
     const player=getPlayer(room,s),bot=room.bots[s];
     return {bot:!!bot&&!player,paddleStats:player?.paddleStats||{w:54,spd:3.5,fr:54,fd:1,er:1}};
   });
-  const world=P.create({players,seed:randomBytes(4).readUInt32LE(0)});
+  const world=P.create({players,mode:room.mode||'ranked',seed:randomBytes(4).readUInt32LE(0)});
   // Two simulation workers isolate auth/database/dashboard work from physics.
   const worker=pool.length<2?makeWorker():pool.reduce((a,b)=>a.matchIds.size<=b.matchIds.size?a:b);
   const net=room.net2={room,io,endGame,onAbort,worker,rate:new Map(),sync:new Map(),metrics:{},lastSecond:-1};
@@ -85,4 +84,6 @@ function sync(room,socket,slot){
 function disconnect(room,socket,slot,voluntary){
   room.net2.authority.disconnect(slot,voluntary);room.net2.rate.delete(socket.id);room.net2.sync.delete(socket.id);
 }
-module.exports={VERSION:P.VERSION,prepare,init,input,sync,disconnect};
+function close(room){const net=matches.get(room.id);if(!net)return;send(net,'close');net.worker.matchIds.delete(room.id);matches.delete(room.id);}
+async function shutdown(){for(const worker of [...pool])await worker.terminate();}
+module.exports={VERSION:P.VERSION,prepare,init,input,sync,disconnect,close,shutdown};
