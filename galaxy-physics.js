@@ -6,9 +6,9 @@
 else root.GalaxyPhysics=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 
-const VERSION='gf-net2-4';
-const TICK_RATE=60,TICK_MS=1000/60,W=520,H=520,BR=8,SMAX=4.875,C=130;
-const PL=54,PLV=54,PTH=16,PTV=16,ML=10,EPU=1/3,ECR=1/10000,FDR=380,FR=54,PS=3.375;
+const VERSION='gf-net2-5';
+const TICK_RATE=60,TICK_MS=1000/60,W=520,H=520,BR=8,SMAX=4.875,C=54;
+const PL=54,PLV=54,PTH=16,PTV=16,ML=10,EPU=1/3,ECR=1/10000,FDR=380,FR=54,PS=3.75;
 const SLOTS=[0,1,2,3],SLOT_VIEW=['bottom','top','left','right'];
 const ELIM_WALL_BOOST=1.30,ELIM_WALL_RANDOM_DEG=25,ELIM_WALL_MIN_SP=3.5,ELIM_WALL_MAX_SP=6.5;
 const MAG_R=75,MAG_PULL_FORCE=1.15,MAG_CAPTURE_RADIUS=3,MAG_RELEASE_PUSH=SMAX;
@@ -18,7 +18,7 @@ function magnetGeometry(s,p,stats){
   const nx=s===2?1:s===3?-1:0,ny=s===0?-1:s===1?1:0;
   const half=(s<2?p.w:p.h)/2,depth=(s<2?p.h:p.w)/2+BR+1;
   return {cx:p.x+p.w/2,cy:p.y+p.h/2,nx,ny,tx:s<2?1:0,ty:s<2?0:1,
-    half,depth,radius:magnetRadius(stats)};
+    half,depth,hullRadius:p.radius||half,radius:magnetRadius(stats)};
 }
 // The pressed latch survives checkpoints and prevents auto-restarting on an empty battery.
 function updateMagnetEnergy(gs,s,want,dt=TICK_MS){
@@ -59,10 +59,13 @@ function slotToPaddle(slot, cx, gs, room) {
       else pvh = dps.w || PLV;
     }
   }
-  if (view==='bottom') return {x:cx-pw/2,  y:H-PTH-2, w:pw,  h:PTH, axis:'x', min:C, max:W-C-pw};
-  if (view==='top')    return {x:cx-pw/2,  y:2,        w:pw,  h:PTH, axis:'x', min:C, max:W-C-pw};
-  if (view==='left')   return {x:2,         y:cx-pvh/2, w:PTV, h:pvh, axis:'y', min:C, max:H-C-pvh};
-  if (view==='right')  return {x:W-PTV-2,   y:cx-pvh/2, w:PTV, h:pvh, axis:'y', min:C, max:H-C-pvh};
+  // The hull centre rides the goal line. Rendering and collisions share this geometry.
+  const d=view==='bottom'||view==='top'?pw:pvh;
+  const common={w:d,h:d,radius:d/2,shape:'circle',axis:slot<2?'x':'y',min:C,max:W-C-d,view};
+  if(view==='bottom')return {...common,x:cx-d/2,y:H-d/2};
+  if(view==='top')return {...common,x:cx-d/2,y:-d/2};
+  if(view==='left')return {...common,x:-d/2,y:cx-d/2};
+  return {...common,x:W-d/2,y:cx-d/2};
 }
 
 function cPt(px, py, ax, ay, bx, by) {
@@ -175,17 +178,20 @@ function applyMagnetBall(gs,s,ball,room,old){
   const front=dx*g.nx+dy*g.ny,tangent=dx*g.tx+dy*g.ty;
   if(front<0||dist>=g.radius)return false;
   const limit=Math.max(0,g.half-BR),at=clamp(tangent,-limit,limit);
-  let tx=g.cx+g.nx*g.depth+g.tx*at,ty=g.cy+g.ny*g.depth+g.ty*at;
+  const depth=Math.sqrt(Math.max(0,(g.hullRadius+BR+1)**2-at*at));
+  let tx=g.cx+g.nx*depth+g.tx*at,ty=g.cy+g.ny*depth+g.ty*at;
   let toX=tx-ball.x,toY=ty-ball.y,toD=Math.hypot(toX,toY);
   let capture=toD<=MAG_CAPTURE_RADIUS;
   if(!capture&&old){
     const move=gs.paddles[s]-(gs.paddlesPrev?.[s]??gs.paddles[s]);
     const odx=old.x-g.cx+g.tx*move,ody=old.y-g.cy+g.ty*move;
     const of=odx*g.nx+ody*g.ny,ot=odx*g.tx+ody*g.ty;
-    if(of>=g.depth&&front<=g.depth&&of-front>1e-9){
-      const fraction=(of-g.depth)/(of-front),cross=ot+(tangent-ot)*fraction;
-      if(Math.abs(cross)<=limit){capture=true;tx=g.cx+g.nx*g.depth+g.tx*cross;ty=g.cy+g.ny*g.depth+g.ty*cross;}
-    }
+    const hit=circleSweep(odx,ody,dx-odx,dy-ody,g.hullRadius+BR+1);
+    if(hit!==null){const hx=odx+(dx-odx)*hit,hy=ody+(dy-ody)*hit;
+      const hf=hx*g.nx+hy*g.ny,ht=hx*g.tx+hy*g.ty;
+      if(hf>=0&&Math.abs(ht)<=limit){capture=true;const d=Math.sqrt(Math.max(0,(g.hullRadius+BR+1)**2-ht*ht));
+        tx=g.cx+g.nx*d+g.tx*ht;ty=g.cy+g.ny*d+g.ty*ht;}}
+
   }
   if(capture){
     const pre={x:ball.x,y:ball.y,vx:ball.vx,vy:ball.vy};
@@ -291,29 +297,78 @@ function applyFFBall(gs,s,b,old) {
   if(speed>.01){const k=clamp(speed,2.5,SMAX)/speed;b.vx*=k;b.vy*=k;}
 }
 
-// Swept ball vs a moving rectangle; no dependence on render frames.
+// Continuous collision against the moving circular hull, in relative space.
+// Used by authority, prediction and rollback; render FPS cannot change contacts.
+function circleSweep(ox,oy,dx,dy,r){
+  const c=ox*ox+oy*oy-r*r;
+  if(c<=0)return 0;
+  const a=dx*dx+dy*dy;if(a<1e-12)return null;
+  const b=2*(ox*dx+oy*dy),disc=b*b-4*a*c;
+  if(disc<0)return null;
+  const t=(-b-Math.sqrt(disc))/(2*a);return t>=0&&t<=1?t:null;
+}
 function paddleContact(gs,s,b,old) {
   const p=slotToPaddle(s,gs.paddlesPrev[s],gs,gs.config);
   const move=gs.paddles[s]-gs.paddlesPrev[s],mx=s<2?move:0,my=s<2?0:move;
-  const vx=b.x-old.x-mx,vy=b.y-old.y-my;
-  const nx=s===2?1:s===3?-1:0,ny=s===0?-1:s===1?1:0;
-  if(b.vx*nx+b.vy*ny>=0)return false;
-  let enter=0,exit=1;
-  for(const [o,v,lo,hi] of [[old.x,vx,p.x-BR,p.x+p.w+BR],[old.y,vy,p.y-BR,p.y+p.h+BR]]){
-    if(Math.abs(v)<1e-9){if(o<lo||o>hi)return false;continue;}
-    let a=(lo-o)/v,z=(hi-o)/v;if(a>z)[a,z]=[z,a];
-    enter=Math.max(enter,a);exit=Math.min(exit,z);if(enter>exit)return false;
-  }
-  if(enter<0||enter>1)return false;
-  const speed=Math.hypot(b.vx,b.vy),center=gs.paddlesPrev[s]+move*enter;
-  const hitX=old.x+(b.x-old.x)*enter,hitY=old.y+(b.y-old.y)*enter;
-  const offset=clamp(((s<2?hitX:hitY)-center)/(gs.config.players[s].paddleStats.w/2),-.85,.85);
-  b.vx=s<2?offset*speed*.7:nx*speed*.85;
-  b.vy=s<2?ny*speed*.85:offset*speed*.7;
-  const actual=Math.hypot(b.vx,b.vy);if(actual>1e-9){b.vx*=speed/actual;b.vy*=speed/actual;}
-  b.x=hitX+nx*.01+b.vx*(1-enter);b.y=hitY+ny*.01+b.vy*(1-enter);
+  const cx=p.x+p.w/2,cy=p.y+p.h/2,r=p.radius+BR;
+  const ox=old.x-cx,oy=old.y-cy,dx=b.x-old.x-mx,dy=b.y-old.y-my;
+  const t=circleSweep(ox,oy,dx,dy,r);if(t===null)return false;
+  let nx=ox+dx*t,ny=oy+dy*t,n=Math.hypot(nx,ny);
+  if(n<1e-9){nx=s===2?1:s===3?-1:0;ny=s===0?-1:s===1?1:0;n=1;}
+  nx/=n;ny/=n;
+  const dot=(b.vx-mx)*nx+(b.vy-my)*ny;
+  if(dot>=-1e-9)return false;
+  const incoming=Math.hypot(b.vx,b.vy);
+  b.vx-=2*dot*nx;b.vy-=2*dot*ny;
+  const speed=Math.hypot(b.vx,b.vy),cap=Math.max(SMAX,incoming);
+  if(speed>cap){b.vx*=cap/speed;b.vy*=cap/speed;}
+  b.x=cx+mx*t+nx*(r+.01)+b.vx*(1-t);
+  b.y=cy+my*t+ny*(r+.01)+b.vy*(1-t);
   b.contact=(b.contact||0)+1;
-  emit(gs,'paddle:hit',{slot:s,speed:round(speed),tick:gs.tick});return true;
+  emit(gs,'paddle:hit',{slot:s,speed:round(incoming),tick:gs.tick});return true;
+}
+
+const ROCKET_RELOAD=30*TICK_RATE,ROCKET_STUN=3*TICK_RATE,ROCKET_OPEN=66;
+function enemyTarget(gs,s,target){
+  return SLOTS.includes(target)&&target!==s&&gs.config.activeSlots.includes(target)&&!gs.eliminated[target]&&
+    (gs.config.mode!=='team'||gs.config.teams[s]!==gs.config.teams[target]);
+}
+function rocketMuzzle(gs,s){
+  const p=slotToPaddle(s,gs.paddles[s],gs,gs.config),a=[0,Math.PI,Math.PI/2,-Math.PI/2][s];
+  // Exact bay centre from the supplied 1254px spacecraft artwork.
+  const lv=gs.config.players[s].paddleStats.level||1;
+  const bay=[[354.5,-288.5,1200],[122,-122,456],[124,-124,456],[130,-130,456],[129,-129,456]][lv-1];
+  const x=bay[0]/bay[2]*p.w,y=bay[1]/bay[2]*p.w;
+  return {x:p.x+p.w/2+x*Math.cos(a)-y*Math.sin(a),y:p.y+p.h/2+x*Math.sin(a)+y*Math.cos(a),angle:a-Math.PI/2};
+}
+function requestRocket(gs,s,input,fresh){
+  const seq=input.rocket||0;if(seq<=gs.lastRocket[s])return;
+  gs.lastRocket[s]=seq;
+  if(!fresh||gs.tick<gs.rocketReadyAt[s]||!enemyTarget(gs,s,input.rocketTarget))return;
+  const launchAt=gs.tick+ROCKET_OPEN;
+  gs.rocketReadyAt[s]=launchAt+ROCKET_RELOAD;gs.bayOpenAt[s]=gs.tick;
+  const muzzle=rocketMuzzle(gs,s);
+  gs.missiles.push({id:gs.nextMissileId++,owner:s,target:input.rocketTarget,launchAt,age:0,...muzzle});
+  emit(gs,'rocket:armed',{slot:s,target:input.rocketTarget,tick:gs.tick});
+}
+function stepRockets(gs){
+  for(let i=gs.missiles.length-1;i>=0;i--){
+    const m=gs.missiles[i];
+    if(!enemyTarget(gs,m.owner,m.target)||gs.eliminated[m.owner]){gs.missiles.splice(i,1);continue;}
+    if(gs.tick<m.launchAt){Object.assign(m,rocketMuzzle(gs,m.owner));continue;}
+    if(m.age===0){Object.assign(m,rocketMuzzle(gs,m.owner));emit(gs,'rocket:launch',{slot:m.owner,target:m.target,id:m.id,tick:gs.tick});}
+    const target=slotToPaddle(m.target,gs.paddles[m.target],gs,gs.config),cx=target.x+target.w/2,cy=target.y+target.h/2;
+    const wanted=Math.atan2(cy-m.y,cx-m.x),turn=Math.atan2(Math.sin(wanted-m.angle),Math.cos(wanted-m.angle));
+    m.angle+=clamp(turn,-.14,.14);const speed=3.5+Math.min(2.5,m.age/30),dx=Math.cos(m.angle)*speed,dy=Math.sin(m.angle)*speed;
+    const move=gs.paddles[m.target]-gs.paddlesPrev[m.target],mx=m.target<2?move:0,my=m.target<2?0:move;
+    const hit=circleSweep(m.x-(cx-mx),m.y-(cy-my),dx-mx,dy-my,target.radius+4);
+    m.x=round(m.x+dx);m.y=round(m.y+dy);m.angle=round(m.angle);m.age++;
+    if(hit!==null){
+      gs.stunUntil[m.target]=Math.max(gs.stunUntil[m.target],gs.tick+ROCKET_STUN);
+      emit(gs,'rocket:hit',{slot:m.owner,target:m.target,id:m.id,tick:gs.tick,until:gs.stunUntil[m.target]});
+      gs.missiles.splice(i,1);
+    }else if(m.age>12*TICK_RATE){gs.missiles.splice(i,1);}
+  }
 }
 
 function queueBall(gs,delay) {
@@ -327,14 +382,15 @@ function create(options={}) {
   const config={players:[],mode,activeSlots:mode==='duel'?[0,1]:[0,1,2,3],teams:mode==='team'?[0,1,1,0]:null,durationTicks:options.durationTicks||10800};
   const arr=v=>SLOTS.map(()=>typeof v==='function'?v():v);
   for(const s of SLOTS){const p=options.players?.[s]||{},st=p.paddleStats||{};
-    config.players[s]={bot:!!p.bot,paddleStats:{w:clamp(st.w||PL,10,250),spd:clamp(st.spd||PS,.1,50),
+    config.players[s]={bot:!!p.bot,paddleStats:{level:clamp(Math.trunc(st.level||1),1,5),w:clamp(st.w||PL,10,250),spd:clamp(st.spd||PS,.1,50),
       fr:clamp(st.fr||FR,1,220),fd:clamp(st.fd||1,.1,20),er:clamp(st.er||1,.1,20)}};
   }
   const gs={version:VERSION,config,tick:0,rng:(options.seed??123456789)>>>0,nextBallId:1,
     paddles:arr(260),paddlesPrev:arr(260),balls:[],respawns:[],lives:arr(ML),scores:arr(0),
     energy:arr(1),fields:arr(()=>({active:false,t:0,r:0,maxR:FR})),magEnergy:arr(1),magnet:arr(false),magPressed:arr(false),
     eliminated:SLOTS.map(s=>!config.activeSlots.includes(s)),eliminationOrder:[],connected:SLOTS.map(s=>config.activeSlots.includes(s)),botTargets:arr(260),
-    inputs:arr(()=>({tick:0,dx:0,magnet:false,boost:0})),lastBoost:arr(0),gameOver:false,winner:null,
+    inputs:arr(()=>({tick:0,dx:0,magnet:false,boost:0,target:null,rocket:0,rocketTarget:-1})),lastBoost:arr(0),
+    missiles:[],nextMissileId:1,lastRocket:arr(0),rocketReadyAt:arr(0),stunUntil:arr(0),bayOpenAt:arr(-10000),gameOver:false,winner:null,
     teamLives:mode==='team'?[20,20]:null,teamScores:mode==='team'?[0,0]:null,winnerTeam:null,endReason:null,events:[]};
   if(mode==='team')gs.lives=arr(20);
   for(let i=0;i<4;i++)queueBall(gs,(options.spawnDelayMs??8000)+i*2000);
@@ -388,7 +444,7 @@ function step(gs,commands={},systems=[]) {
   gs.paddlesPrev=gs.paddles.slice();
   for(const sys of systems){const s=sys.slot;if(!SLOTS.includes(s))continue;
     if(sys.type==='eliminate')eliminate(gs,s,sys.reason||'leave');
-    if(sys.type==='connected'){gs.connected[s]=!!sys.value;gs.inputs[s]={tick:gs.tick,dx:0,magnet:false,boost:gs.lastBoost[s]};}}
+    if(sys.type==='connected'){gs.connected[s]=!!sys.value;gs.inputs[s]={tick:gs.tick,dx:0,magnet:false,boost:gs.lastBoost[s],target:null,rocket:gs.lastRocket[s],rocketTarget:-1};}}
   for(const s of SLOTS){
     if(gs.eliminated[s])continue;
     const stats=gs.config.players[s].paddleStats,f=gs.fields[s];
@@ -397,11 +453,13 @@ function step(gs,commands={},systems=[]) {
     else gs.energy[s]=Math.min(1,gs.energy[s]+ECR*TICK_MS*stats.er);
     let input=commands[s];
     if(gs.config.players[s].bot)input=botInput(gs,s);
-    if(input)gs.inputs[s]={tick:gs.tick,dx:clamp(input.dx||0,-1,1),magnet:!!input.magnet,boost:input.boost||0};
+    if(input)gs.inputs[s]={tick:gs.tick,dx:clamp(input.dx||0,-1,1),magnet:!!input.magnet,boost:input.boost||0,target:Number.isFinite(input.target)?clamp(input.target,0,W):null,rocket:input.rocket||0,rocketTarget:input.rocketTarget??-1};
     input=gs.inputs[s];
     // An absent client cannot keep moving/holding magnet indefinitely.
     const fresh=gs.connected[s]&&gs.tick-input.tick<=8;
-    gs.paddles[s]=round(clamp(gs.paddles[s]+(fresh?input.dx:0)*stats.spd,C+stats.w/2,W-C-stats.w/2));
+    const wanted=input.target===null?input.dx*stats.spd:clamp(input.target-gs.paddles[s],-stats.spd,stats.spd);
+    gs.paddles[s]=round(clamp(gs.paddles[s]+(fresh&&gs.tick>=gs.stunUntil[s]?wanted:0),C+stats.w/2,W-C-stats.w/2));
+    requestRocket(gs,s,input,fresh);
     if(input.boost>gs.lastBoost[s]){gs.lastBoost[s]=input.boost;
       if(fresh&&!f.active&&gs.energy[s]>=EPU){f.active=true;f.t=0;f.r=0;f.maxR=stats.fr;gs.energy[s]-=EPU;
         emit(gs,'event:field',{type:'activate',slot:s,tick:gs.tick,paddleX:gs.paddles[s],maxR:f.maxR});}}
@@ -409,6 +467,7 @@ function step(gs,commands={},systems=[]) {
       let i=0;for(const b of gs.balls)if(b['mag_held_'+s])releaseMagnetBall(gs,s,b,i++,gs.config);
     }
   }
+  stepRockets(gs);
   for(let i=gs.respawns.length-1;i>=0;i--){const r=gs.respawns[i];r.timer=round(r.timer-TICK_MS);
     if(r.timer<=.0001){gs.balls.push({id:gs.nextBallId++,x:260,y:260,vx:r.vx,vy:r.vy,contact:0});gs.respawns.splice(i,1);}}
   for(let i=gs.balls.length-1;i>=0;i--){const b=gs.balls[i],old={x:b.x,y:b.y};
@@ -454,5 +513,5 @@ function copyPhysics(value){
 function checkpoint(gs){const out={};for(const key of Object.keys(gs))out[key]=key==='events'?[]:copyPhysics(gs[key]);return out;}
 function hash(gs){const s=checkpoint(gs),str=JSON.stringify(s);let h=2166136261;
   for(let i=0;i<str.length;i++)h=Math.imul(h^str.charCodeAt(i),16777619);return (h>>>0).toString(16);}
-return {VERSION,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall};
+return {VERSION,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall,circleSweep,enemyTarget,rocketMuzzle,constants:{C,W,H,ROCKET_RELOAD,ROCKET_STUN,ROCKET_OPEN}};
 });

@@ -17,7 +17,7 @@ test('insufficient energy consumes no partial activation and each repeated tap h
 });
 test('attraction fades smoothly to zero, is stronger near the ship and never captures at a distance',()=>{
   const w=world();w.magnet[0]=true;
-  const pulls=[30,50,70,74.99,75,80].map(d=>{const b=ball(w,0,d);P.applyMagnetBall(w,0,b);assert.ok(!b.mag_held_0);return b.vy;});
+  const pulls=[42,55,70,74.99,75,80].map(d=>{const b=ball(w,0,d);P.applyMagnetBall(w,0,b);assert.ok(!b.mag_held_0);return b.vy;});
   assert.ok(pulls[0]>pulls[1]&&pulls[1]>pulls[2]&&pulls[2]>pulls[3]);assert.ok(pulls[3]<1e-6);assert.equal(pulls[4],0);assert.equal(pulls[5],0);
   const behind=ball(w,0,-5,40);P.applyMagnetBall(w,0,behind);assert.equal(behind.vy,0);
 });
@@ -29,22 +29,22 @@ test('short tap only bends trajectory: no capture, release impulse or teleport',
   }
 });
 test('all four orientations pull to the real paddle surface, hold through movement, then launch at field speed',()=>{
-  for(const s of P.SLOTS)for(const stats of [{w:54,fr:54},{w:130,fr:110},{w:220,fr:180}]){
-    const w=world(stats);w.balls=[ball(w,s,50,7,0)];let tick=0;
+  for(const s of P.SLOTS)for(const stats of [{w:54,fr:54},{w:75.6,fr:75.6},{w:108,fr:108}]){
+    const w=world(stats);w.balls=[ball(w,s,stats.w/2+25,7,0)];let tick=0;
     while(tick<100&&!w.balls[0]['mag_held_'+s])P.step(w,{[s]:command(++tick)});
     assert.ok(w.balls[0]['mag_held_'+s],`capture slot ${s}`);
     for(let i=0;i<10;i++){P.step(w,{[s]:command(++tick,true,1)});const b=w.balls[0],p=P.slotToPaddle(s,w.paddles[s],w,w.config),g=P.magnetGeometry(s,p,stats);
-      assert.ok(Math.abs((b.x-g.cx)*g.nx+(b.y-g.cy)*g.ny-g.depth)<1e-5);assert.ok(Math.abs(b.x-g.cx-b['mag_offX_'+s])<1e-5);}
+      assert.ok(Math.abs(Math.hypot(b.x-g.cx,b.y-g.cy)-(g.hullRadius+9))<1e-5);assert.ok(Math.abs(b.x-g.cx-b['mag_offX_'+s])<1e-5);}
     const before={...w.balls[0]};P.step(w,{[s]:command(++tick,false)});const b=w.balls[0];assert.ok(!b['mag_held_'+s]);assert.ok(Math.abs(Math.hypot(b.vx,b.vy)-4.875)<1e-5);
     assert.ok(Math.hypot(b.x-before.x,b.y-before.y)<5);assert.equal(w.events.filter(e=>e.data.type==='magnet_release').length,1);
   }
 });
 test('swept capture catches fast incoming balls before paddle bounce; missed paddle is not a magic save',()=>{
-  for(const s of P.SLOTS){const w=world();w.balls=[ball(w,s,21,0,6.5)];P.step(w,{[s]:command(1)});assert.ok(w.balls[0]['mag_held_'+s]);
-    const m=world();m.balls=[ball(m,s,21,50,6.5)];P.step(m,{[s]:command(1)});assert.ok(!m.balls[0]['mag_held_'+s]);}
+  for(const s of P.SLOTS){const w=world();w.balls=[ball(w,s,40,0,6.5)];P.step(w,{[s]:command(1)});assert.ok(w.balls[0]['mag_held_'+s]);
+    const m=world();m.balls=[ball(m,s,40,50,6.5)];P.step(m,{[s]:command(1)});assert.ok(!m.balls[0]['mag_held_'+s]);}
 });
 test('energy exhaustion, stale input, disconnect and elimination release held balls exactly once',()=>{
-  for(const mode of ['energy','stale','disconnect','eliminate']){const w=world();w.balls=[ball(w,0,18,0,1)];P.step(w,{0:command(1)});assert.ok(w.balls[0].mag_held_0);
+  for(const mode of ['energy','stale','disconnect','eliminate']){const w=world();w.balls=[ball(w,0,37,0,1)];P.step(w,{0:command(1)});assert.ok(w.balls[0].mag_held_0);
     let releases=0;for(let t=2;t<=15;t++){if(mode==='energy')w.magEnergy[0]=0;
       P.step(w,mode==='stale'?{}:{0:command(t)},t===2&&['disconnect','eliminate'].includes(mode)?[{type:mode==='disconnect'?'connected':'eliminate',slot:0,value:false}]:[]);
       releases+=w.events.filter(e=>e.data.type==='magnet_release').length;}
@@ -52,7 +52,7 @@ test('energy exhaustion, stale input, disconnect and elimination release held ba
 });
 test('magnet range grows with real upgrade stats; every ball has at most one owner',()=>{
   assert.equal(P.magnetRadius({fr:54}),75);assert.ok(P.magnetRadius({fr:100})>75);
-  const w=world({w:140,fr:180});w.balls=[0,1,2,3].map((id)=>({...ball(w,0,40,id*12-18,2),id}));
+  const w=world({w:140,fr:180});w.balls=[0,1,2,3].map((id)=>({...ball(w,0,85,id*12-18,2),id}));
   for(let t=1;t<=40;t++)P.step(w,Object.fromEntries(P.SLOTS.map(s=>[s,command(t)])));
   assert.equal(w.balls.filter(b=>b.mag_held_0).length,4);
   for(const b of w.balls)assert.equal(P.SLOTS.filter(s=>b['mag_held_'+s]).length,1);

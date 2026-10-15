@@ -1,3 +1,4 @@
+const UfoFleet = require('./galaxy-fleet');
 // SERVER FINAL — Authoritative 60 tick
 const { createServer } = require('http');
 const { readFileSync } = require('fs');
@@ -267,7 +268,7 @@ function makeRankedBot(playerRating) {
   const nick = RANKED_BOT_NICKS[Math.floor(Math.random() * RANKED_BOT_NICKS.length)];
   const avatarId = Math.floor(Math.random() * 5);
   // Ракетка залежно від рейтингу
-  const pid = Math.min(19, Math.floor(rating / 120));
+  const pid = 0;
   const avgUpgrade = Math.floor(Math.random() * 80) + 10;
   return { nick, rating, avatarId, isRankedBot: true, paddleId: pid, avgUpgrade };
 }
@@ -319,12 +320,7 @@ function getLevelMultSrv(level){
 
 // Переводимо sub → {level, sublevel}
 // 4-рівнева система: sub 0..40, level 1..4, sublevel 0..10
-function subToLevelSrv(sub){
-  sub = Math.max(0, Math.min(MAX_SUB_SRV, sub|0));
-  const level = Math.min(4, Math.floor(sub/10) + 1);
-  const sublevel = (level === 4) ? Math.min(10, sub - 30) : (sub % 10);
-  return {level, sublevel};
-}
+function subToLevelSrv(sub){return UfoFleet.progress(sub);}
 
 // Отримуємо поточний sub з hangar object (з міграцією з legacy 6-параметрів)
 function getHangarSubSrv(hangar){
@@ -408,28 +404,7 @@ const ENERGY_GOLD_COST_SRV = 50;
 // ══════════════════════════════════════════════════════
 // ВАЖЛИВО: ДОЛЖНО бути синхронізовано з PADDLE_CATALOG у index.html (рядок ~1665)
 // Якщо міняєш базові характеристики — міняй в ОБОХ місцях!
-const PADDLE_CATALOG_SRV = [
-  { spd:3.375, w:54, fr:54, bm:2.32, er:1.0, fd:1.0 }, // 0 Новачок
-  { spd:3.375, w:62, fr:54, bm:2.32, er:1.0, fd:1.0 }, // 1 Фронтир
-  { spd:4.5,   w:50, fr:54, bm:2.32, er:1.0, fd:1.0 }, // 2 Вектор
-  { spd:3.375, w:52, fr:68, bm:2.32, er:1.0, fd:1.0 }, // 3 Орбіта
-  { spd:3.375, w:52, fr:54, bm:2.9,  er:1.0, fd:1.0 }, // 4 Імпульс
-  { spd:2.5,   w:72, fr:54, bm:2.32, er:1.2, fd:1.0 }, // 5 Авангард
-  { spd:5.5,   w:46, fr:50, bm:2.0,  er:1.3, fd:0.8 }, // 6 Спринт
-  { spd:3.8,   w:42, fr:72, bm:2.6,  er:1.0, fd:1.4 }, // 7 Сталкер
-  { spd:4.0,   w:58, fr:60, bm:2.5,  er:1.2, fd:1.2 }, // 8 Баланс
-  { spd:2.8,   w:80, fr:50, bm:2.0,  er:1.5, fd:1.0 }, // 9 Егіда
-  { spd:6.0,   w:48, fr:58, bm:2.4,  er:1.5, fd:0.7 }, // 10 Зевс
-  { spd:3.2,   w:50, fr:90, bm:2.6,  er:0.8, fd:1.6 }, // 11 Полюс
-  { spd:3.6,   w:66, fr:60, bm:2.8,  er:1.3, fd:1.3 }, // 12 Титан
-  { spd:5.0,   w:52, fr:72, bm:2.7,  er:1.4, fd:1.2 }, // 13 Темпест
-  { spd:3.8,   w:62, fr:70, bm:3.2,  er:1.2, fd:1.5 }, // 14 Кріон
-  { spd:5.2,   w:54, fr:66, bm:3.4,  er:1.5, fd:1.2 }, // 15 Рейвен
-  { spd:4.0,   w:76, fr:78, bm:3.0,  er:1.3, fd:1.6 }, // 16 Фантом
-  { spd:3.5,   w:58, fr:86, bm:3.8,  er:1.2, fd:1.8 }, // 17 Інферно
-  { spd:5.0,   w:68, fr:80, bm:3.5,  er:1.6, fd:1.6 }, // 18 Етернал
-  { spd:6.0,   w:76, fr:92, bm:4.0,  er:2.0, fd:2.0 }, // 19 Абсолют
-];
+const PADDLE_CATALOG_SRV = [UfoFleet.base];
 
 const HANGAR_PARTS_SRV = ['w', 'spd', 'fr', 'bm', 'er', 'fd'];
 
@@ -440,39 +415,11 @@ function hangarMultSrv(level) {
 }
 
 // Дефолтні stats — для нових гравців або fallback при помилках.
-const DEFAULT_PADDLE_STATS = Object.freeze({
-  spd:3.375, w:54, fr:54, bm:2.32, er:1.0, fd:1.0,
-  paddleId:0, avgUpgrade:0,
-});
+const DEFAULT_PADDLE_STATS = Object.freeze(UfoFleet.stats(0));
 
 // Pure функція — розраховує фінальні stats без I/O.
 // hangars — { '5': {sub:13} or legacy {w:3, spd:7, ...}, '12': {...} }
-function computePaddleStats(paddleId, hangars) {
-  const pid = (paddleId|0);
-  const base = PADDLE_CATALOG_SRV[pid] || PADDLE_CATALOG_SRV[0];
-  const hangarForPid = (hangars && (hangars[pid] || hangars[String(pid)])) || {};
-  const result = { paddleId: pid };
-
-  // ── НОВА ЛОГІКА: множник на основі рівня (з sub) ──
-  // L1=1.00, L2=1.06, L3=1.13, L4=1.21, L5=1.30
-  // Стати міняються тільки при milestone (level up), не при кожному sublevel.
-  const sub = getHangarSubSrv(hangarForPid);
-  const info = subToLevelSrv(sub);
-  const mult = getLevelMultSrv(info.level);
-
-  for (const part of HANGAR_PARTS_SRV) {
-    result[part] = +(base[part] * mult).toFixed(3);
-  }
-
-  // avgUpgrade тепер = sub/MAX_SUB для backward compat з старим клієнтом
-  result.avgUpgrade = sub / MAX_SUB_SRV;
-  // Додатково даємо рівень/sublevel — клієнт може використовувати для UI
-  result.level = info.level;
-  result.sublevel = info.sublevel;
-  result.sub = sub;
-
-  return result;
-}
+function computePaddleStats(paddleId, hangars) {return UfoFleet.stats(hangars?.[0]?.sub);}
 
 // Async: читає актуальні дані гравця з Firestore, валідує і повертає
 // серверно-розраховані paddleStats. Блокує читерство:
@@ -489,34 +436,8 @@ async function loadValidatedPaddleStats(uid) {
     const pub = pubSnap.exists ? pubSnap.data() : {};
     const priv = privSnap.exists ? privSnap.data() : {};
 
-    let paddleId = pub.paddleId|0;
-    const ownedPaddles = Array.isArray(priv.ownedPaddles) ? priv.ownedPaddles : [0];
-
-    // Валідація: чи володіє паддлом? Якщо ні → fallback до першої доступної.
-    if (!ownedPaddles.includes(paddleId)) {
-      console.log('[paddleStats] uid='+uid+' namesake="'+pub.nickname+'" tried paddleId='+paddleId+' but ownedPaddles='+JSON.stringify(ownedPaddles)+' → fallback to 0');
-      paddleId = ownedPaddles.includes(0) ? 0 : (ownedPaddles[0]|0);
-    }
-
-    // Валідація рівнів апгрейдів: clamp в [1..10] для legacy полів,
-    // [0..50] для нового sub поля
-    const rawHangars = priv.hangars && typeof priv.hangars === 'object' ? priv.hangars : {};
-    const safeHangars = {};
-    for (const [pid, parts] of Object.entries(rawHangars)) {
-      if (!parts || typeof parts !== 'object') continue;
-      safeHangars[pid] = {};
-      // Legacy 6-параметрів (для backward compatibility / migration)
-      for (const part of HANGAR_PARTS_SRV) {
-        const lv = parts[part]|0;
-        safeHangars[pid][part] = Math.max(1, Math.min(10, lv || 1));
-      }
-      // Нове поле sub (5×10 sublevels)
-      if (typeof parts.sub === 'number') {
-        safeHangars[pid].sub = Math.max(0, Math.min(MAX_SUB_SRV, parts.sub|0));
-      }
-    }
-
-    return computePaddleStats(paddleId, safeHangars);
+    // Read the new namespace only. Never overwrite prior purchases or hangars.
+    return UfoFleet.fromAccount(priv);
   } catch(e) {
     console.error('[paddleStats] load error for uid='+uid+':', e.message);
     return { ...DEFAULT_PADDLE_STATS };
@@ -574,42 +495,22 @@ async function resolveUid({ idToken, fallbackUid }) {
 // при старті і перезаписує свої локальні значення.
 // Змінюючи константу — мінять ТУТ, клієнт автоматично підхопить.
 // CONFIG_VERSION — якщо бампаєш — clients повинні refetch (кеш invalidate).
-const CONFIG_VERSION = 1;
+const CONFIG_VERSION = 2;
 
 // Повний каталог ракеток (дзеркало клієнтського, плюс name/desc/price — для UI)
-const PADDLE_CATALOG_FULL = [
-  {id:0, name:'Новачок',  desc:'Базова ракетка',                price:0,     cur:'free',   lvl:1,  spd:3.375,w:54,fr:54,bm:2.32,er:1.0, fd:1.0},
-  {id:1, name:'Фронтир',  desc:'Ширша площа відбивання',        price:8000,  cur:'silver', lvl:1,  spd:3.375,w:62,fr:54,bm:2.32,er:1.0, fd:1.0},
-  {id:2, name:'Вектор',   desc:'Підвищена швидкість руху',      price:12000, cur:'silver', lvl:2,  spd:4.5,  w:50,fr:54,bm:2.32,er:1.0, fd:1.0},
-  {id:3, name:'Орбіта',   desc:'Більший радіус силового поля',  price:15000, cur:'silver', lvl:2,  spd:3.375,w:52,fr:68,bm:2.32,er:1.0, fd:1.0},
-  {id:4, name:'Імпульс',  desc:'Сильніше відбиття поля',        price:18000, cur:'silver', lvl:3,  spd:3.375,w:52,fr:54,bm:2.9, er:1.0, fd:1.0},
-  {id:5, name:'Авангард', desc:'Дуже широка але повільна',      price:22000, cur:'silver', lvl:3,  spd:2.5,  w:72,fr:54,bm:2.32,er:1.2, fd:1.0},
-  {id:6, name:'Спринт',   desc:'Максимальна швидкість',         price:28000, cur:'silver', lvl:4,  spd:5.5,  w:46,fr:50,bm:2.0, er:1.3, fd:0.8},
-  {id:7, name:'Сталкер',  desc:'Вузька з великим полем',        price:32000, cur:'silver', lvl:4,  spd:3.8,  w:42,fr:72,bm:2.6, er:1.0, fd:1.4},
-  {id:8, name:'Баланс',   desc:'Рівні покращені характеристики',price:38000, cur:'silver', lvl:5,  spd:4.0,  w:58,fr:60,bm:2.5, er:1.2, fd:1.2},
-  {id:9, name:'Егіда',    desc:'Гігантська ширина',             price:45000, cur:'silver', lvl:6,  spd:2.8,  w:80,fr:50,bm:2.0, er:1.5, fd:1.0},
-  {id:10,name:'Зевс',     desc:'Надшвидка з середнім полем',    price:55000, cur:'silver', lvl:7,  spd:6.0,  w:48,fr:58,bm:2.4, er:1.5, fd:0.7},
-  {id:11,name:'Полюс',    desc:'Гігантський радіус поля',       price:65000, cur:'silver', lvl:8,  spd:3.2,  w:50,fr:90,bm:2.6, er:0.8, fd:1.6},
-  {id:12,name:'Титан',    desc:'Широка і потужна',              price:200,   cur:'gold',   lvl:5,  spd:3.6,  w:66,fr:60,bm:2.8, er:1.3, fd:1.3},
-  {id:13,name:'Темпест',  desc:'Швидка з великим полем',        price:300,   cur:'gold',   lvl:6,  spd:5.0,  w:52,fr:72,bm:2.7, er:1.4, fd:1.2},
-  {id:14,name:'Кріон',    desc:'Потужне поле з широкою базою',  price:350,   cur:'gold',   lvl:7,  spd:3.8,  w:62,fr:70,bm:3.2, er:1.2, fd:1.5},
-  {id:15,name:'Рейвен',   desc:'Висока сила і швидкість',       price:450,   cur:'gold',   lvl:9,  spd:5.2,  w:54,fr:66,bm:3.4, er:1.5, fd:1.2},
-  {id:16,name:'Фантом',   desc:'Широка з великим полем',        price:550,   cur:'gold',   lvl:10, spd:4.0,  w:76,fr:78,bm:3.0, er:1.3, fd:1.6},
-  {id:17,name:'Інферно',  desc:'Найпотужніше поле в грі',       price:650,   cur:'gold',   lvl:12, spd:3.5,  w:58,fr:86,bm:3.8, er:1.2, fd:1.8},
-  {id:18,name:'Етернал',  desc:'Все збалансовано на максимумі', price:800,   cur:'gold',   lvl:15, spd:5.0,  w:68,fr:80,bm:3.5, er:1.6, fd:1.6},
-  {id:19,name:'Абсолют',  desc:'Найкраща ракетка в грі',        price:1000,  cur:'gold',   lvl:20, spd:6.0,  w:76,fr:92,bm:4.0, er:2.0, fd:2.0},
-];
+const PADDLE_CATALOG_FULL = [UfoFleet.base];
 
 function getPublicConfig() {
   return {
     version: CONFIG_VERSION,
     paddleCatalog: PADDLE_CATALOG_FULL,
+    fleetVersion: UfoFleet.VERSION,
     hangarCosts: HANGAR_COSTS_SRV,       // null, silver/gold ціни за рівень (LEGACY)
     hangarSubCosts: HANGAR_SUB_COSTS_SRV, // нова лінійна прокачка (5×10 = 50)
     energyGoldCost: ENERGY_GOLD_COST_SRV,
     game: {
-      W, H, C, BR, SMAX, PL, PLV, PTH, PTV,
-      ML, EPU, FR, BMULT, PS,
+      W, H, C:54, BR, SMAX, PL:54, PLV:54, PTH:54, PTV:54,
+      ML, EPU, FR, BMULT, PS:UfoFleet.base.spd,
       FDR, RD,
       tickRate: TICK_RATE,
       matchDurationMs: 3 * 60 * 1000,
@@ -773,7 +674,7 @@ function getFFRadius(f) {
 }
 
 // ── FORCE FIELD REPULSOR (continuous field) ──
-// 
+//
 // Поведінка: поле працює як гравітаційний репульсор. Щотіку м'яч, що знаходиться
 // в радіусі, отримує імпульс по нормалі (від центра поля назовні). Чим ГЛИБШЕ
 // м'яч у полі — тим СИЛЬНІШИЙ push. Додатково, при першому входженні в поле
@@ -2016,11 +1917,11 @@ function endGame(room, winnerSlot) {
 
 function startGame(room) {
   room.status = 'playing';
-  // Боти тільки для тренування — в рейтингових грають тільки реальні гравці
+  // Ranked timeout restores the original bots; team and private duels stay human-only.
   const isTrainingRoom = room.mode==='training'||Object.values(room.players).some(p => p.trainingMode);
   if (isTrainingRoom) {
     fillBots(room, false);
-  } else if(!room.managed) {
+  } else if(room.mode==='ranked'||!room.managed) {
     // Ranked — заповнюємо порожні слоти ranked-ботами
     fillBots(room, true);
   }
@@ -2247,7 +2148,7 @@ io.on('connection', (socket) => {
   socket.on('mm:join', async ({ nick, rating, uid, idToken, wins, games, paddleStats, trainingMode, avatarId, platform, netVersion }) => {
     if (myRoom && myRoom.status === 'playing') return;
     if(!trainingMode&&(netVersion!==netcode2.VERSION||process.env.NETCODE_V2==='0')){
-      socket.emit('mm:error','Оновіть Galaxy Football у Google Play до версії 20.11 або новішої.');return;
+      socket.emit('mm:error','Оновіть Galaxy Football у Google Play до версії 20.14 або новішої.');return;
     }
     // ── SECURITY: верифікуємо idToken, витягуємо реальний uid ──
     const verifiedUid = await resolveUid({ idToken, fallbackUid: uid });
@@ -2481,7 +2382,7 @@ io.on('connection', (socket) => {
       const diff = Math.abs(clampedPos - serverPos);
 
       // Server-follows-client: беремо клієнтську позицію (prediction вже валідована клампами + швидкістю).
-      // АЛЕ: коли магніт активний, обмежуємо максимальний delta за тік щоб м'яч не "стрибав" 
+      // АЛЕ: коли магніт активний, обмежуємо максимальний delta за тік щоб м'яч не "стрибав"
       // через network batching (коли кілька пакетів прийшли разом після паузи).
       if (gs.magnet && gs.magnet[slot] && diff > 8) {
         // Обмежуємо рух paddle до 3×швидкості за тік — достатньо швидко щоб догнати,
@@ -2711,125 +2612,20 @@ const DAILY_REWARDS = { 1: 100, 2: 50, 3: 30 };
 
 // ── SHOP SOCKET HANDLERS ──
 function registerShopHandlers(socket) {
-  // ── Купівля ракетки ──
-  socket.on('shop:buy_paddle', async ({ paddleId }) => {
-    if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
-    if (!socket.uid) return socket.emit('shop:error', { msg: 'auth_required' });
-    const pid = parseInt(paddleId);
-    const priceDef = PADDLE_PRICES_SRV[pid];
-    if (!priceDef) return socket.emit('shop:error', { msg: 'invalid_paddle' });
-    if (priceDef.cur === 'free') return socket.emit('shop:error', { msg: 'already_free' });
+  // Retired fleet stays in accounts; stale clients must not spend currency on it.
+  socket.on('shop:buy_paddle',()=>socket.emit('shop:error',{msg:'fleet_unavailable'}));
+  socket.on('shop:upgrade_hangar',()=>socket.emit('shop:error',{msg:'fleet_unavailable'}));
 
-    const privRef = db.collection('users_private').doc(socket.uid);
-    const pubRef  = db.collection('users_public').doc(socket.uid);
-
-    try {
-      // ── ТРАНЗАКЦІЯ: атомарно read → check → write ──
-      // Firestore автоматично re-tryить, якщо документ змінився між read і write
-      const result = await db.runTransaction(async (tx) => {
-        const privSnap = await tx.get(privRef);
-        if (!privSnap.exists) throw { code: 'user_not_found' };
-        const priv = privSnap.data();
-
-        if ((priv.ownedPaddles || []).includes(pid)) throw { code: 'already_owned' };
-
-        const silver = priv.silver || 0;
-        const gold   = priv.gold   || 0;
-        if (priceDef.cur === 'silver' && silver < priceDef.price) throw { code: 'not_enough_silver' };
-        if (priceDef.cur === 'gold'   && gold   < priceDef.price) throw { code: 'not_enough_gold' };
-
-        const newOwned = [...(priv.ownedPaddles || []), pid];
-        const privUpd = { ownedPaddles: newOwned };
-        let newSilver = silver, newGold = gold;
-        if (priceDef.cur === 'silver') { privUpd.silver = silver - priceDef.price; newSilver = privUpd.silver; }
-        if (priceDef.cur === 'gold')   { privUpd.gold   = gold   - priceDef.price; newGold   = privUpd.gold; }
-
-        tx.update(privRef, privUpd);
-        tx.update(pubRef, { paddleId: pid });
-
-        return { paddleId: pid, silver: newSilver, gold: newGold };
-      });
-
-      socket.emit('shop:bought_paddle', {
-        paddleId: result.paddleId,
-        ...(priceDef.cur === 'silver' ? { silver: result.silver } : { gold: result.gold }),
-      });
-      // Аналітика покупки
-      trackEvent('purchase', {
-        uid: socket.uid, kind: 'paddle', item: pid,
-        amount: priceDef.price, cur: priceDef.cur,
-      });
-    } catch(e) {
-      if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
-      console.error('shop:buy_paddle', e.message);
-      socket.emit('shop:error', { msg: 'server_error' });
-    }
-  });
-
-  // ── Апгрейд модуля ──
-  socket.on('shop:upgrade_hangar', async ({ paddleId, partId }) => {
-    if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
-    if (!socket.uid) return socket.emit('shop:error', { msg: 'auth_required' });
-    const pid = parseInt(paddleId);
-    const VALID_PARTS = ['w','spd','fr','bm','er','fd'];
-    if (!VALID_PARTS.includes(partId)) return socket.emit('shop:error', { msg: 'invalid_part' });
-
-    const privRef = db.collection('users_private').doc(socket.uid);
-
-    try {
-      const result = await db.runTransaction(async (tx) => {
-        const privSnap = await tx.get(privRef);
-        if (!privSnap.exists) throw { code: 'user_not_found' };
-        const priv = privSnap.data();
-
-        const hangars = priv.hangars || {};
-        const currentLv = ((hangars[pid] || {})[partId]) || 1;
-        if (currentLv >= 10) throw { code: 'max_level' };
-
-        const cost = HANGAR_COSTS_SRV[currentLv];
-        if (!cost) throw { code: 'invalid_level' };
-
-        const silver = priv.silver || 0;
-        const gold   = priv.gold   || 0;
-        if (cost.cur === 'silver' && silver < cost.price) throw { code: 'not_enough_silver' };
-        if (cost.cur === 'gold'   && gold   < cost.price) throw { code: 'not_enough_gold' };
-
-        const newLv = currentLv + 1;
-        const upd = {};
-        upd[`hangars.${pid}.${partId}`] = newLv;
-        let newSilver = silver, newGold = gold;
-        if (cost.cur === 'silver') { upd.silver = silver - cost.price; newSilver = upd.silver; }
-        if (cost.cur === 'gold')   { upd.gold   = gold   - cost.price; newGold   = upd.gold; }
-
-        tx.update(privRef, upd);
-        return { paddleId: pid, partId, newLevel: newLv, silver: newSilver, gold: newGold, cur: cost.cur };
-      });
-
-      socket.emit('shop:upgraded', {
-        paddleId: result.paddleId, partId: result.partId, newLevel: result.newLevel,
-        ...(result.cur === 'silver' ? { silver: result.silver } : { gold: result.gold }),
-      });
-      trackEvent('purchase', {
-        uid: socket.uid, kind: 'hangar', item: `${result.paddleId}:${result.partId}:${result.newLevel}`,
-        amount: HANGAR_COSTS_SRV[result.newLevel - 1]?.price, cur: result.cur,
-      });
-    } catch(e) {
-      if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
-      console.error('shop:upgrade_hangar', e.message);
-      socket.emit('shop:error', { msg: 'server_error' });
-    }
-  });
-
-  // ═══════════════════════════════════════════════════════
   // ── shop:upgrade_next — нова лінійна прокачка (5×10 sublevels) ──
   // Інкрементує sub на 1. Сервер сам обчислює рівень+sublevel з sub.
   // На відміну від upgrade_hangar — не вимагає вибору параметра.
   // ═══════════════════════════════════════════════════════
-  socket.on('shop:upgrade_next', async ({ paddleId }) => {
+  socket.on('shop:upgrade_next', async ({ paddleId, fleetVersion }) => {
     if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
     if (!socket.uid) return socket.emit('shop:error', { msg: 'auth_required' });
-    const pid = parseInt(paddleId);
-    if (!Number.isFinite(pid) || pid < 0 || pid > 19) return socket.emit('shop:error', { msg: 'invalid_paddle' });
+    if (fleetVersion !== UfoFleet.VERSION) return socket.emit('shop:error', {msg:'update_required'});
+    const pid = Number(paddleId);
+    if (!Number.isFinite(pid) || pid !== 0) return socket.emit('shop:error', { msg: 'invalid_paddle' });
 
     const privRef = db.collection('users_private').doc(socket.uid);
 
@@ -2839,8 +2635,7 @@ function registerShopHandlers(socket) {
         if (!privSnap.exists) throw { code: 'user_not_found' };
         const priv = privSnap.data();
 
-        const hangars = priv.hangars || {};
-        const currentSub = getHangarSubSrv(hangars[pid] || {});
+        const currentSub = UfoFleet.clampSub(priv.ufoHangar?.sub);
         if (currentSub >= MAX_SUB_SRV) throw { code: 'max_sublevel' };
 
         const newSub = currentSub + 1;
@@ -2857,7 +2652,7 @@ function registerShopHandlers(socket) {
         // Записуємо тільки sub (нове поле). Старі поля {w,spd,...} залишаються
         // незмінними у БД для backward compatibility, але більше не використовуються
         const upd = {};
-        upd[`hangars.${pid}.sub`] = newSub;
+        upd['ufoHangar.sub'] = newSub;
         let newSilver = silver, newGold = gold;
         if (cost.cur === 'silver') { upd.silver = silver - cost.price; newSilver = upd.silver; }
         if (cost.cur === 'gold')   { upd.gold   = gold   - cost.price; newGold   = upd.gold; }

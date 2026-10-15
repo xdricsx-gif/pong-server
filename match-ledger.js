@@ -10,8 +10,10 @@ function createLedger({db,owner,now=Date.now}){
   const pub=uid=>db.collection('users_public').doc(uid);
   function available(){if(!db)throw fail('server_unavailable');}
   async function reserve(id,mode,roster){available();const rule=Rules.get(mode);
-    if(!roster.length||new Set(roster.map(p=>p.uid)).size!==roster.length)throw fail('invalid_roster');
-    if((mode==='ranked'||mode==='team')&&roster.length!==4||mode==='duel'&&roster.length!==2||mode==='training'&&roster.length!==1)throw fail('invalid_roster');
+    if(!roster.length||new Set(roster.map(p=>p.uid)).size!==roster.length||new Set(roster.map(p=>p.slot)).size!==roster.length||roster.some(p=>typeof p.uid!=='string'||!p.uid||!rule.slots.includes(p.slot)))throw fail('invalid_roster');
+    // Ranked bots have no account, entry debit or payout. Human prizes stay fixed
+    // at 250 / 150 / 0 / 0 even when fewer than four humans fund the match.
+    if(mode==='ranked'&&roster.length>4||mode==='team'&&roster.length!==4||mode==='duel'&&roster.length!==2||mode==='training'&&roster.length!==1)throw fail('invalid_roster');
     return db.runTransaction(async tx=>{
       const ref=session(id),old=await tx.get(ref);if(old.exists){const d=old.data();
         if(d.mode!==mode||JSON.stringify(d.roster)!==JSON.stringify(roster))throw fail('match_conflict');return d;}
@@ -70,7 +72,7 @@ function createLedger({db,owner,now=Date.now}){
       tx.update(priv(p.uid),wallet);if(Object.keys(updates).length)tx.update(pub(p.uid),updates);
       tx.set(priv(p.uid).collection('matches').doc(id),{matchId:id,type:d.mode,place:r.place,goalsConceded:result.scores?.[p.slot]||0,ratingDelta:r.ratingDelta,xp:r.xp,silver:r.silver,stake:d.stake,netSilver:r.silver-d.stake,date:now(),draw:!!result.draw,aborted:!!result.aborted,
         teamGoalsConceded:d.mode==='team'?result.teamScores?.[Rules.get('team').teams[p.slot]]??0:null,
-        opponents:d.roster.filter(x=>x.uid!==p.uid).map(x=>x.nick)});
+        opponents:Object.keys(result.players||{}).length?Object.entries(result.players).filter(([slot])=>Number(slot)!==p.slot).map(([,player])=>player.nick):d.roster.filter(x=>x.uid!==p.uid).map(x=>x.nick)});
     }
     // Totals are stored privately and filtered by the service before sending.
     result.totals=totals;tx.update(ref,{state:'settled',result,settledAt:now(),leaseUntil:Number.MAX_SAFE_INTEGER});return result;

@@ -35,13 +35,14 @@ class Authority {
       packet.epoch!==this.epochs[slot]||packet.version!==P.VERSION||!Array.isArray(packet.commands)||packet.commands.length>16){this.metrics.rejected++;return false;}
     for(const c of packet.commands){
       if(!c||!validInt(c.seq)||c.seq===0||!validInt(c.tick)||!validInt(c.boost)||c.boost>c.seq||
-        ![-1,0,1].includes(c.dx)||typeof c.magnet!=='boolean'||c.tick>this.world.tick+FUTURE||c.tick<this.minTicks[slot]){this.metrics.rejected++;continue;}
+        ![-1,0,1].includes(c.dx)||(c.target!=null&&(!Number.isFinite(c.target)||c.target<0||c.target>520))||
+        (c.rocket!==undefined&&(!validInt(c.rocket)||c.rocket>c.seq))||(c.rocketTarget!==undefined&&![-1,0,1,2,3].includes(c.rocketTarget))||typeof c.magnet!=='boolean'||c.tick>this.world.tick+FUTURE||c.tick<this.minTicks[slot]){this.metrics.rejected++;continue;}
       const seen=this.seen[slot];if(seen.has(c.seq)){this.metrics.duplicate++;continue;}
       if(c.tick<=this.committed){this.metrics.tooLate++;continue;}
       let list=this.commands.get(c.tick);if(!list){list={};this.commands.set(c.tick,list);}
       // First valid command for a slot/tick is immutable, even across replay.
       if(list[slot]){this.metrics.rejected++;continue;}
-      list[slot]={seq:c.seq,tick:c.tick,dx:c.dx,boost:c.boost,magnet:c.magnet};
+      list[slot]={seq:c.seq,tick:c.tick,dx:c.dx,boost:c.boost,magnet:c.magnet,target:c.target??null,rocket:c.rocket||0,rocketTarget:c.rocketTarget??-1};
       seen.set(c.seq,c.tick);this.ack[slot]=Math.max(this.ack[slot],c.seq);this.metrics.accepted++;
       if(c.tick<=this.world.tick)this.dirty=this.dirty===null?c.tick:Math.min(this.dirty,c.tick);
     }
@@ -89,7 +90,7 @@ class Client {
   constructor({slot,matchId,epoch,send=()=>{},requestSync=()=>{}}){
     this.slot=slot;this.matchId=matchId;this.epoch=epoch;this.send=send;this.requestSync=requestSync;
     this.world=null;this.previous=null;this.base=null;this.latestId=-1;this.seq=0;this.boost=0;
-    this.pending=new Map();this.input={dx:0,magnet:false};this.boostQueued=false;
+    this.pending=new Map();this.input={dx:0,magnet:false,target:null};this.boostQueued=false;this.rocket=0;this.rocketTarget=-1;this.rocketQueued=false;
     this.anchorTime=0;this.anchorTick=0;this.rtt=100;this.lastReceived=0;this.lastSent=-Infinity;
     this.clockOffset=null;this.clockSamples=[];this.hasAnchor=false;this.lastCorrection=[];
     this.remoteCommands=new Map();this.systemEvents=new Map();
@@ -98,9 +99,10 @@ class Client {
     this.metrics={snapshots:0,staleSnapshots:0,reconciliations:0,softCorrections:0,hardCorrections:0,
       maxCorrection:0,predictionStops:0,maxPending:0,ownPaddleCorrections:0,maxOwnPaddleCorrection:0,replayedLocalPastInputs:0};
   }
-  setInput({dx=0,magnet=false,boost=false}){
-    this.input={dx:clamp(dx,-1,1),magnet:!!magnet};if(boost)this.boostQueued=true;
+  setInput({dx=0,magnet=false,boost=false,target=null}){
+    this.input={dx:clamp(dx,-1,1),magnet:!!magnet,target:Number.isFinite(target)?clamp(target,0,520):null};if(boost)this.boostQueued=true;
   }
+  fireRocket(target){if([0,1,2,3].includes(target)){this.rocketTarget=target;this.rocketQueued=true;}}
   setRtt(ms){if(Number.isFinite(ms)&&ms>=0&&ms<3000)this.rtt=clamp(ms,0,400);}
   clockSample({c,s},now){
     if(!Number.isFinite(c)||!Number.isFinite(s)||now<c||now-c>3000)return;
@@ -109,14 +111,14 @@ class Client {
     const best=this.clockSamples.reduce((a,b)=>a.rtt<b.rtt?a:b);
     this.clockOffset=best.offset;this.setRtt(this.rtt*.8+rtt*.2);
   }
-  suspend(){this.paused=true;this.input={dx:0,magnet:false};this.boostQueued=false;this.needsSync=true;}
+  suspend(){this.paused=true;this.input={dx:0,magnet:false};this.boostQueued=false;this.rocketQueued=false;this.needsSync=true;}
   requestSynchronization(now,reset=false){
     // Every entry path shares the retry clock. A between-frame resume anchors
     // its retry on the next frame without sending another immediate request.
     this.lastSyncRequest=Number.isFinite(now)?now:null;
     this.requestSync(reset);
   }
-  resume(){this.paused=false;this.pending.clear();this.boostQueued=false;this.needsSync=true;this.resumeRequested=true;this.requestSynchronization(null,true);}
+  resume(){this.paused=false;this.pending.clear();this.boostQueued=false;this.rocketQueued=false;this.needsSync=true;this.resumeRequested=true;this.requestSynchronization(null,true);}
   commandsAt(tick){
     const accepted=this.remoteCommands.get(tick)||{},local=this.pending.get(tick);
     // The server's immutable accepted command wins any same-tick conflict.
@@ -148,7 +150,8 @@ class Client {
     }
     for(const {tick,events} of packet.replay.systems)this.systemEvents.set(tick,events);
     this.boost=Math.max(this.boost,this.base.lastBoost[this.slot]);
-    this.seq=Math.max(this.seq,this.boost,packet.ack[this.slot]);this.metrics.snapshots++;
+    this.rocket=Math.max(this.rocket,this.base.lastRocket[this.slot]);
+    this.seq=Math.max(this.seq,this.boost,this.rocket,packet.ack[this.slot]);this.metrics.snapshots++;
     // A recent server snapshot can precede receipt of our uplink. Keep redundant
     // commands until committed, otherwise one dropped packet can lose a button edge.
     for(const [tick] of this.pending)if(tick<=packet.committed)this.pending.delete(tick);
@@ -199,7 +202,8 @@ class Client {
       const t=this.world.tick+1;
       let c=this.pending.get(t);
       if(!c){const seq=++this.seq;if(this.boostQueued){this.boost=seq;this.boostQueued=false;}
-        c={tick:t,seq,dx:this.input.dx,magnet:this.input.magnet,boost:this.boost};this.pending.set(t,c);}
+        if(this.rocketQueued){this.rocket=seq;this.rocketQueued=false;}
+        c={tick:t,seq,dx:this.input.dx,magnet:this.input.magnet,boost:this.boost,target:this.input.target??null,rocket:this.rocket,rocketTarget:this.rocketTarget};this.pending.set(t,c);}
       this.previous=P.checkpoint(this.world);P.step(this.world,this.commandsAt(t),this.systemEvents.get(t)||[]);
     }
     this.metrics.maxPending=Math.max(this.metrics.maxPending,this.pending.size);
@@ -220,6 +224,10 @@ class Client {
       else if(old&&old.contact===b.contact){b.x=old.x+(b.x-old.x)*alpha;b.y=old.y+(b.y-old.y)*alpha;}
       const correction=this.corrections.get(b.id);if(correction){const k=clamp(1-(now-correction.time)/80,0,1);
         if(k&&held===undefined&&correction.contact===b.contact&&b.x>130&&b.x<390&&b.y>130&&b.y<390){b.x+=correction.dx*k;b.y+=correction.dy*k;}else this.corrections.delete(b.id);}
+    }
+    for(const m of w.missiles||[]){const old=prev.missiles?.find(x=>x.id===m.id);
+      if(old&&m.age>0&&old.age>0){m.x=old.x+(m.x-old.x)*alpha;m.y=old.y+(m.y-old.y)*alpha;
+        m.angle=old.angle+Math.atan2(Math.sin(m.angle-old.angle),Math.cos(m.angle-old.angle))*alpha;}
     }
     return w;
   }

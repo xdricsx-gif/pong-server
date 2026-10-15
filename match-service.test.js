@@ -3,6 +3,13 @@ const test=require('node:test'),assert=require('node:assert/strict'),{io}=requir
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 function event(s,name,timeout=5000){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{s.off(name,done);reject(Error('timeout: '+name));},timeout);const done=d=>{clearTimeout(timer);resolve(d);};s.once(name,done);});}
 async function connect(url,uid){const s=io(url,{transports:['websocket'],reconnection:false,timeout:2000});await Promise.race([event(s,'connect'),event(s,'connect_error').then(e=>{throw e;})]);const ready=event(s,'match:ready');s.emit('match:auth',{idToken:'qa:'+uid,netVersion:P.VERSION});await ready;return s;}
+test('live sockets: ranked fallback starts bots and preserves the full human reward',{timeout:16000},async t=>{
+ const f=createFixture({rankedWaitMs:80}),url=await f.listen(),sockets=[];t.after(async()=>{sockets.forEach(s=>s.disconnect());await f.close();});
+ const a=await connect(url,'a');sockets.push(a);const started=event(a,'net:init');a.emit('mm:join',{mode:'ranked',idToken:'qa:a',netVersion:P.VERSION});const init=await started;
+ assert.deepEqual(init.snapshot.world.config.players.map(p=>p.bot),[false,true,true,true]);const room=f.rooms.get(init.matchId),done=event(a,'match:result');
+ for(const slot of [3,2,1])room.net2.authority.system({type:'eliminate',slot,reason:'leave'});const result=await done;
+ assert.equal(result.rewards[0].silver,250);assert.equal(f.data.get('users_private/a').silver,1150);assert.deepEqual(Object.keys(result.rewards),['0']);
+});
 test('live sockets: 1v1 consent, no side players, reconnect deadline, durable result and no costs',{timeout:16000},async t=>{
  const f=createFixture({graceMs:300}),url=await f.listen();const sockets=[];t.after(async()=>{sockets.forEach(s=>s.disconnect());await f.close();});
  const a=await connect(url,'a'),b=await connect(url,'b');sockets.push(a,b);

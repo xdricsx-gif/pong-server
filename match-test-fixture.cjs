@@ -9,7 +9,7 @@ function database(users=['a','b','c','d']){
  const db={collection,runTransaction:fn=>{const p=queue.then(async()=>{let wrote=false;const writes=[];
    const out=await fn({get:async r=>{if(wrote)throw Error('read_after_write');return snapshot(r);},
      create:(r,d)=>{wrote=true;if(data.has(r.path))throw Error('exists');writes.push(()=>data.set(r.path,structuredClone(d)));},
-     update:(r,d)=>{wrote=true;writes.push(()=>{if(!data.has(r.path))throw Error('missing_doc');data.set(r.path,{...data.get(r.path),...structuredClone(d)});});},
+     update:(r,d)=>{wrote=true;writes.push(()=>{if(!data.has(r.path))throw Error('missing_doc');const next=structuredClone(data.get(r.path));for(const [key,value]of Object.entries(d)){const parts=key.split('.');let obj=next;for(const p of parts.slice(0,-1))obj=obj[p]||(obj[p]={});obj[parts.at(-1)]=structuredClone(value);}data.set(r.path,next);});},
      set:(r,d)=>{wrote=true;writes.push(()=>data.set(r.path,structuredClone(d)));}});
    if(failCommits>0){failCommits--;throw Error('write_failed');}writes.forEach(fn=>fn());return out;});queue=p.catch(()=>{});return p;}};
  return {db,data,failNext:()=>failCommits++};

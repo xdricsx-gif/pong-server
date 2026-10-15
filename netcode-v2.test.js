@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const P=require('./galaxy-physics'),{Authority,Client,WINDOW,HISTORY}=require('./galaxy-netcode');
 function world(){const w=P.create({seed:456,spawnDelayMs:0});w.respawns=[];return w;}
 function authority(w=world(),commit=()=>{}){return new Authority({matchId:'test',world:w,onCommit:commit});}
-const cmd=(tick,dx=0,boost=0,magnet=false)=>({tick,seq:tick,dx,boost,magnet});
+const cmd=(tick,dx=0,boost=0,magnet=false)=>({tick,seq:tick,dx,boost,magnet,target:null,rocket:0,rocketTarget:-1});
 function send(a,slot,...commands){return a.receive(slot,{version:P.VERSION,matchId:'test',epoch:a.epochs[slot],commands});}
 test('checkpoint contains every future-affecting value, including PRNG and held balls',()=>{
   const a=P.create({seed:23,players:[{bot:true},{bot:true},{bot:true},{bot:true}],spawnDelayMs:0});
@@ -50,9 +50,9 @@ test('confirmed goals are immutable and terminal rewards are committed once',()=
 test('input validation rejects teleports, NaN, unlimited future, duplicate rewriting and old epochs',()=>{
   const a=authority();send(a,0,{...cmd(1),dx:NaN},cmd(200),{...cmd(1),boost:10});
   assert.equal(a.metrics.accepted,0);send(a,0,cmd(1,1));send(a,0,cmd(1,-1));a.advance();
-  assert.equal(a.world.paddles[0],263.375);
+  assert.equal(a.world.paddles[0],263.75);
   const epoch=a.epochs[0];a.connect(0);a.receive(0,{version:P.VERSION,matchId:'test',epoch,commands:[cmd(2,1)]});
-  a.advance();assert.equal(a.world.paddles[0],263.375);
+  a.advance();assert.equal(a.world.paddles[0],263.75);
 });
 test('out of order input recovers without repeating a field action or charging twice',()=>{
   const a=authority();for(let i=0;i<5;i++)a.advance();
@@ -62,8 +62,8 @@ test('out of order input recovers without repeating a field action or charging t
 });
 test('moving paddle CCD catches crossing at the contact coordinate, not the end coordinate',()=>{
   const w=world();w.paddlesPrev[0]=230;w.paddles[0]=240;
-  const b={id:1,x:267,y:513,vx:0,vy:45,contact:0};
-  assert.equal(P.paddleContact(w,0,b,{x:267,y:468}),true);assert.ok(b.vy<0);assert.ok(b.y<500);
+  const b={id:1,x:238,y:514,vx:0,vy:55,contact:0};
+  assert.equal(P.paddleContact(w,0,b,{x:238,y:459}),true);assert.ok(b.vy<0);assert.ok(b.y<520);
 });
 test('moving field CCD catches relative crossing even when both endpoints are outside',()=>{
   const w=world();w.paddlesPrev[0]=180;w.paddles[0]=340;
@@ -102,7 +102,7 @@ test('rendered held balls stay anchored to the same interpolated paddle',()=>{
   const w=world();w.balls=[{id:1,x:260,y:470,vx:0,vy:0,contact:0,mag_held_0:true,mag_offX_0:0,mag_offY_0:-40}];w.magnet[0]=true;
   const a=authority(w),c=new Client({slot:0,matchId:'test',epoch:0});c.receive(a.snapshot(),0);
   c.setInput({dx:1,magnet:true});c.advance(17);
-  for(const now of [17,21,26,30]){const v=c.sample(now),b=v.balls[0];assert.equal(b.x,v.paddles[0]);assert.equal(b.y,470);}
+  for(const now of [17,21,26,30]){const v=c.sample(now),b=v.balls[0];assert.equal(b.x,v.paddles[0]);assert.equal(b.y,520-40);}
 });
 test('wire compression roundtrip preserves all physics and command state exactly',()=>{
   const Wire=require('./galaxy-wire');const a=authority(P.create({seed:33,spawnDelayMs:0}));

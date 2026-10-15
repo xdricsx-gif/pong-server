@@ -2,7 +2,7 @@
 const {randomUUID}=require('node:crypto');
 const P=require('./galaxy-physics'),Rules=require('./match-rules'),{createLedger}=require('./match-ledger');
 const ERRORS={update_required:'Онови гру в Google Play, щоб грати в нових режимах.',auth_required:'Увійди в акаунт повторно.',already_playing:'Спочатку заверши поточний матч або пошук.',not_enough_silver:'Для цього бою потрібно 100 срібла в кожного учасника.',not_enough_energy:'Для тренування потрібно 20 енергії.',offline:'Гравець зараз не в мережі.',busy:'Гравець уже в матчі або пошуку.',invite_pending:'Запрошення цьому гравцю вже надіслано.',invite_rate_limit:'Забагато запрошень. Зачекай хвилину.',invite_expired:'Запрошення вже неактивне.',server_unavailable:'Сервер тимчасово недоступний. Спробуй ще раз.',wrong_uid:'Це запрошення або матч належить іншому гравцю.'};
-function createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer,startGame,net,getDb,authenticate,loadStats,onSettled=()=>{},now=Date.now,graceMs=30000}){
+function createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer,startGame,net,getDb,authenticate,loadStats,onSettled=()=>{},now=Date.now,graceMs=30000,rankedWaitMs=10000}){
   const owner=randomUUID(),online=new Map(),profiles=new Map(),inMatch=new Map(),queued=new Map(),queues={ranked:[],team:[]},invites=new Map();
   let ledger,chain=Promise.resolve(),closed=false;
   const store=()=>{if(!getDb())fail('server_unavailable');return ledger||(ledger=createLedger({db:getDb(),owner,now}));};
@@ -34,6 +34,7 @@ function createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer
   }
   function ensure(s){if(!s.matchAuthenticated||online.get(s.uid)!==s)fail('auth_required');return s.uid;}
   function cancelQueue(uid){const group=queued.get(uid);if(!group)return;
+    clearTimeout(group.timer);
     queues[group.mode]=queues[group.mode].filter(g=>g!==group);for(const id of group.uids){queued.delete(id);socketFor(id)?.emit('match:queue_cancelled');}
   }
   function cancelInvites(uid){for(const [id,v] of invites)if(v.from===uid||v.to===uid){invites.delete(id);socketFor(v.from)?.emit('match:invite_closed',{id});socketFor(v.to)?.emit('match:invite_closed',{id});}}
@@ -42,6 +43,14 @@ function createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer
     const group={mode,uids};for(const uid of uids){queued.set(uid,group);cancelInvites(uid);socketFor(uid).emit('match:queued',{mode,count:uids.length});}
     queues[mode].push(group);
     if(mode==='ranked'){
+      // The oldest waiting group keeps its deadline when more players arrive.
+      // Missing slots are filled by the existing ranked bots in startGame.
+      group.timer=setTimeout(()=>serial(null,async()=>{
+        if(closed||!queues.ranked.includes(group))return;
+        const selected=[];let count=0;
+        for(const g of queues.ranked){if(count+g.uids.length<=4){selected.push(g);count+=g.uids.length;}if(count===4)break;}
+        if(count)await createMatch('ranked',selected.flatMap(g=>g.uids),selected);
+      }),rankedWaitMs);group.timer.unref?.();
       while(queues.ranked.reduce((n,g)=>n+g.uids.length,0)>=4){let selected=[],count=0;
         for(const g of queues.ranked){if(count+g.uids.length<=4){selected.push(g);count+=g.uids.length;}if(count===4)break;}
         if(count!==4)break;await createMatch(mode,selected.flatMap(g=>g.uids),selected);
@@ -58,7 +67,7 @@ function createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer
   }
   async function createMatch(mode,uids,groups=[]){
     for(const uid of uids)if(!socketFor(uid)||inMatch.has(uid))fail('busy');
-    for(const g of groups){queues[mode]=queues[mode].filter(x=>x!==g);for(const uid of g.uids)queued.delete(uid);}
+    for(const g of groups){clearTimeout(g.timer);queues[mode]=queues[mode].filter(x=>x!==g);for(const uid of g.uids)queued.delete(uid);}
     const room=createRoom('m_'+randomUUID());room.managed=true;room.mode=mode;room.protocol=2;room.roster={};room.lease={};room.status='reserving';
     for(let slot=0;slot<uids.length;slot++){const uid=uids[slot];room.roster[slot]={...profiles.get(uid),slot};cancelInvites(uid);}
     for(const uid of uids)inMatch.set(uid,room);rooms.set(room.id,room);
@@ -171,6 +180,6 @@ function createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer
     const ids=[...rooms.values()].filter(r=>r.managed&&r.status==='playing').map(r=>r.id);
     store().renew(ids).then(()=>store().sweep()).catch(e=>console.error('[match ledger]',e.code||e.message));
   },15000);heartbeat.unref?.();
-  return {attach,finish,abort,info,close(){closed=true;clearInterval(heartbeat);for(const room of rooms.values()){for(const l of Object.values(room.lease||{}))clearTimeout(l.timer);clearTimeout(room.retry);}},_state:{online,profiles,inMatch,queued,queues,invites},_expire:expire};
+  return {attach,finish,abort,info,close(){closed=true;clearInterval(heartbeat);for(const group of new Set(queued.values()))clearTimeout(group.timer);for(const room of rooms.values()){for(const l of Object.values(room.lease||{}))clearTimeout(l.timer);clearTimeout(room.retry);}},_state:{online,profiles,inMatch,queued,queues,invites},_expire:expire};
 }
 module.exports={createMatchService};

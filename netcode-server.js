@@ -1,7 +1,7 @@
 'use strict';
 const {performance}=require('node:perf_hooks'),{randomBytes}=require('node:crypto');
 const {Worker}=require('node:worker_threads'),{join}=require('node:path');
-const P=require('./galaxy-physics');
+const P=require('./galaxy-physics'),Fleet=require('./galaxy-fleet');
 const Wire=require('./galaxy-wire');
 const pool=[],matches=new Map();
 function send(net,type,data={}){net.worker.postMessage({type,id:net.room.id,...data});}
@@ -54,7 +54,7 @@ function makeWorker(){
 function prepare(room,{io,getPlayer,endGame,onAbort}){
   const players=P.SLOTS.map(s=>{
     const player=getPlayer(room,s),bot=room.bots[s];
-    return {bot:!!bot&&!player,paddleStats:player?.paddleStats||{w:54,spd:3.5,fr:54,fd:1,er:1}};
+    return {bot:!!bot&&!player,paddleStats:player?.paddleStats||Fleet.stats(0)};
   });
   const world=P.create({players,mode:room.mode||'ranked',seed:randomBytes(4).readUInt32LE(0)});
   // Two simulation workers isolate auth/database/dashboard work from physics.
