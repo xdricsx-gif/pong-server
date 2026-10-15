@@ -2148,7 +2148,7 @@ io.on('connection', (socket) => {
   socket.on('mm:join', async ({ nick, rating, uid, idToken, wins, games, paddleStats, trainingMode, avatarId, platform, netVersion }) => {
     if (myRoom && myRoom.status === 'playing') return;
     if(!trainingMode&&(netVersion!==netcode2.VERSION||process.env.NETCODE_V2==='0')){
-      socket.emit('mm:error','Оновіть Galaxy Football у Google Play до версії 20.15 або новішої.');return;
+      socket.emit('mm:error','Оновіть Galaxy Football у Google Play до версії 20.16 або новішої.');return;
     }
     // ── SECURITY: верифікуємо idToken, витягуємо реальний uid ──
     const verifiedUid = await resolveUid({ idToken, fallbackUid: uid });

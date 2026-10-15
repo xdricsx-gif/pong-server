@@ -6,7 +6,7 @@
 else root.GalaxyPhysics=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 
-const VERSION='gf-net2-6';
+const VERSION='gf-net2-7';
 const TICK_RATE=60,TICK_MS=1000/60,W=520,H=520,BR=8,SMAX=4.875,C=54;
 const PL=54,PLV=54,PTH=16,PTV=16,ML=10,EPU=1/3,ECR=1/10000,FDR=380,FR=54,PS=3.75;
 const SLOTS=[0,1,2,3],SLOT_VIEW=['bottom','top','left','right'];
@@ -287,6 +287,14 @@ function applyFFBall(gs,s,b,old) {
     b.vx+=mx*.7+nx;b.vy+=my*.7+ny;
     b.x=old.x+(b.x-old.x)*t+nx*2;
     b.y=old.y+(b.y-old.y)*t+ny*2;
+    b[key]=true;b.contact=(b.contact||0)+1;
+    emit(gs,'event:ball',{type:'field_reflect',slot:s,ballId:b.id,tick:gs.tick});
+  }else if(!b[key]){
+    // Activation around an already-inside ball is a single decisive impulse.
+    // Preserve the existing speed ceiling; do not teleport it to the field edge.
+    b.vx=nx*SMAX+mx*.7;b.vy=ny*SMAX+my*.7;
+    const impulseSpeed=Math.hypot(b.vx,b.vy);
+    if(impulseSpeed>.01){b.vx*=SMAX/impulseSpeed;b.vy*=SMAX/impulseSpeed;}
     b[key]=true;b.contact=(b.contact||0)+1;
     emit(gs,'event:ball',{type:'field_reflect',slot:s,ballId:b.id,tick:gs.tick});
   }else{
