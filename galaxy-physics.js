@@ -6,7 +6,7 @@
 else root.GalaxyPhysics=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 
-const VERSION='gf-net2-5';
+const VERSION='gf-net2-6';
 const TICK_RATE=60,TICK_MS=1000/60,W=520,H=520,BR=8,SMAX=4.875,C=54;
 const PL=54,PLV=54,PTH=16,PTV=16,ML=10,EPU=1/3,ECR=1/10000,FDR=380,FR=54,PS=3.75;
 const SLOTS=[0,1,2,3],SLOT_VIEW=['bottom','top','left','right'];
@@ -425,18 +425,30 @@ function finishIfNeeded(gs) {
     emit(gs,'finish',{winner:gs.winner,tick:gs.tick});
   }
 }
+// Every bot uses the same forgiving policy in local and authoritative matches.
+// Hold a decision for 14 ticks (233 ms), so a sudden deflection cannot be read
+// instantly. Target error persists for the decision; frame-by-frame jitter would
+// average to perfect aim. RNG, targets and last input already live in checkpoints.
 function botInput(gs,s) {
-  const horizontal=s<2,wall=s===0?510:s===1?10:s===2?10:510;
-  let ball=null,best=Infinity;
-  for(const b of gs.balls){const vel=s===0?b.vy:s===1?-b.vy:s===2?-b.vx:b.vx;
-    const d=Math.abs((horizontal?b.y:b.x)-wall),t=d/Math.max(.01,vel);
-    if(vel>0&&t<best){best=t;ball=b;}}
-  let target=260;if(ball)target=(horizontal?ball.x:ball.y)+(horizontal?ball.vx:ball.vy)*Math.min(best,16)*.8;
-  gs.botTargets[s]+= (target+(random(gs)-.5)*5-gs.botTargets[s])*.16;
-  const diff=gs.botTargets[s]-gs.paddles[s],fr=gs.config.players[s].paddleStats.fr;
-  return {tick:gs.tick,dx:Math.abs(diff)>1?Math.sign(diff):0,magnet:false,
-    boost:best>=5&&best<=30&&Math.abs(target-gs.paddles[s])<fr+BR+4?gs.lastBoost[s]+1:gs.lastBoost[s]};
+  let boost=gs.lastBoost[s];
+  if((gs.tick+s*3)%14===0){
+    const horizontal=s<2,wall=s===0?H:s===1?0:s===2?0:W;
+    let ball=null,best=Infinity;
+    for(const b of gs.balls){
+      const vel=s===0?b.vy:s===1?-b.vy:s===2?-b.vx:b.vx;
+      const d=Math.abs((horizontal?b.y:b.x)-wall),t=d/Math.max(.01,vel);
+      if(vel>0&&t<best){best=t;ball=b;}
+    }
+    const aim=ball?(horizontal?ball.x:ball.y)+(horizontal?ball.vx:ball.vy)*Math.min(best,10)*.35:260;
+    gs.botTargets[s]=round(clamp(aim+(ball?(random(gs)-.5)*52:0),C,W-C));
+    const fr=gs.config.players[s].paddleStats.fr;
+    // One chance per decision, not sixty chances per second to retry a miss.
+    if(ball&&best>=4&&best<=19&&Math.abs(gs.botTargets[s]-gs.paddles[s])<fr*.8&&random(gs)<.55)boost++;
+  }
+  const diff=gs.botTargets[s]-gs.paddles[s];
+  return {tick:gs.tick,dx:Math.abs(diff)>4?clamp(diff/12,-.72,.72):0,magnet:false,boost};
 }
+
 function step(gs,commands={},systems=[]) {
   gs.tick++;gs.events=[];
   // Continue ticking a provisional outcome until the authority commits it.
