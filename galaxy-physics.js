@@ -6,7 +6,7 @@
 else root.GalaxyPhysics=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 
-const VERSION='gf-net2-7';
+const VERSION='gf-net2-8';
 const TICK_RATE=60,TICK_MS=1000/60,W=520,H=520,BR=8,SMAX=4.875,C=54;
 const PL=54,PLV=54,PTH=16,PTV=16,ML=10,EPU=1/3,ECR=1/10000,FDR=380,FR=54,PS=3.75;
 const SLOTS=[0,1,2,3],SLOT_VIEW=['bottom','top','left','right'];
@@ -23,6 +23,7 @@ function magnetGeometry(s,p,stats){
 // The pressed latch survives checkpoints and prevents auto-restarting on an empty battery.
 function updateMagnetEnergy(gs,s,want,dt=TICK_MS){
   if(!gs.magPressed)gs.magPressed=[false,false,false,false];
+  if(abilitiesLocked(gs,s)){gs.magPressed[s]=!!want;gs.magnet[s]=false;gs.magEnergy[s]=0;return false;}
   const was=!!gs.magnet[s],pressed=!!want&&!gs.magPressed[s];
   gs.magPressed[s]=!!want;
   let active=was&&want&&gs.magEnergy[s]>0;
@@ -352,7 +353,7 @@ function rocketMuzzle(gs,s){
 function requestRocket(gs,s,input,fresh){
   const seq=input.rocket||0;if(seq<=gs.lastRocket[s])return;
   gs.lastRocket[s]=seq;
-  if(!fresh||gs.tick<gs.rocketReadyAt[s]||!enemyTarget(gs,s,input.rocketTarget))return;
+  if(!fresh||abilitiesLocked(gs,s)||gs.tick<gs.rocketReadyAt[s]||!enemyTarget(gs,s,input.rocketTarget))return;
   const launchAt=gs.tick+ROCKET_OPEN;
   gs.rocketReadyAt[s]=launchAt+ROCKET_RELOAD;gs.bayOpenAt[s]=gs.tick;
   const muzzle=rocketMuzzle(gs,s);
@@ -379,6 +380,86 @@ function stepRockets(gs){
   }
 }
 
+// Every ability is tick-driven and entirely checkpointed. Visuals never own timers.
+const SHIELD_DURATION=10*TICK_RATE,SHIELD_DEPLOY=60,ABILITY_RELOAD=30*TICK_RATE;
+const SHIELD_BOUNCE_GAIN=1.30,SHIELD_MIN_SPEED=SMAX,SHIELD_MAX_SPEED=6.5,SHIELD_MIN_NORMAL=.5;
+const EMP_LOCK=10*TICK_RATE,EMP_CHARGE=30,EMP_SPEED=7,EMP_RANGE=780,EMP_HALF_ANGLE=Math.PI/6;
+function abilitiesLocked(gs,s){return gs.tick<(gs.empUntil?.[s]||0);}
+function goalGeometry(s){
+  const horizontal=s<2,line=s===0?H:s===3?W:0;
+  return {a:horizontal?{x:C,y:line}:{x:line,y:C},b:horizontal?{x:W-C,y:line}:{x:line,y:H-C},
+    nx:s===2?1:s===3?-1:0,ny:s===0?-1:s===1?1:0};
+}
+function requestShield(gs,s,input,fresh){
+  const seq=input.shield||0;if(seq<=gs.lastShield[s])return;gs.lastShield[s]=seq;
+  if(!fresh||abilitiesLocked(gs,s)||gs.tick<gs.shieldReadyAt[s])return;
+  const p=slotToPaddle(s,gs.paddles[s],gs,gs.config);
+  gs.goalShields[s]={startTick:gs.tick,activeAt:gs.tick+SHIELD_DEPLOY,until:gs.tick+SHIELD_DEPLOY+SHIELD_DURATION,x:p.x+p.w/2,y:p.y+p.h/2};
+  gs.shieldReadyAt[s]=gs.tick+ABILITY_RELOAD;
+  emit(gs,'shield:launch',{slot:s,tick:gs.tick});
+}
+function shieldActive(gs,s){const f=gs.goalShields?.[s];return !!(f&&!gs.eliminated[s]&&gs.tick>=f.activeAt&&gs.tick<f.until);}
+function requestEMP(gs,s,input,fresh){
+  const seq=input.emp||0;if(seq<=gs.lastEmp[s])return;gs.lastEmp[s]=seq;
+  if(!fresh||abilitiesLocked(gs,s)||gs.tick<gs.empReadyAt[s]||!Number.isFinite(input.empX)||!Number.isFinite(input.empY))return;
+  const p=slotToPaddle(s,gs.paddles[s],gs,gs.config),x=p.x+p.w/2,y=p.y+p.h/2,dx=input.empX-x,dy=input.empY-y;
+  const g=goalGeometry(s);if(Math.hypot(dx,dy)<8||dx*g.nx+dy*g.ny<=0)return;
+  gs.empWaves.push({id:gs.nextEmpId++,owner:s,x,y,angle:round(Math.atan2(dy,dx)),startTick:gs.tick,hitMask:0});
+  gs.empReadyAt[s]=gs.tick+ABILITY_RELOAD;
+  emit(gs,'emp:charge',{slot:s,tick:gs.tick});
+}
+function disableAbilities(gs,s,owner){
+  gs.empUntil[s]=Math.max(gs.empUntil[s],gs.tick+EMP_LOCK);gs.energy[s]=0;gs.magEnergy[s]=0;
+  gs.fields[s].active=false;gs.fields[s].r=0;gs.fields[s].t=0;gs.magnet[s]=false;
+  // Drop captured balls gently. An EMP interruption is not a player-triggered launch.
+  const g=goalGeometry(s);
+  for(const b of gs.balls){delete b['ff_hit_'+s];if(b['mag_held_'+s]){
+    delete b['mag_held_'+s];delete b['mag_offX_'+s];delete b['mag_offY_'+s];
+    b.vx=g.nx*2.5;b.vy=g.ny*2.5;b.contact=(b.contact||0)+1;b['mag_release_until_'+s]=gs.tick+12;
+  }}
+  // Missiles already in flight and deployed goal anchors are autonomous.
+  gs.missiles=gs.missiles.filter(m=>m.owner!==s||gs.tick>=m.launchAt);
+  gs.bayOpenAt[s]=-10000;
+  gs.empWaves=gs.empWaves.filter(e=>e.owner!==s||gs.tick>=e.startTick+EMP_CHARGE);
+  emit(gs,'emp:hit',{slot:owner,target:s,tick:gs.tick,until:gs.empUntil[s]});
+}
+function stepEMPs(gs){
+  if(!gs.empWaves.length)return;
+  // Snapshot iteration lets a hit cancel another ship's charging wave safely.
+  for(const e of gs.empWaves.slice()){
+    if(!gs.empWaves.includes(e))continue;
+    const age=gs.tick-e.startTick-EMP_CHARGE;
+    if(age<0)continue;
+    const radius=age*EMP_SPEED,previous=Math.max(0,radius-EMP_SPEED);
+    if(radius>EMP_RANGE+EMP_SPEED){gs.empWaves=gs.empWaves.filter(w=>w!==e);continue;}
+    for(const s of SLOTS){
+      if((e.hitMask&(1<<s))||!enemyTarget(gs,e.owner,s))continue;
+      const p=slotToPaddle(s,gs.paddles[s],gs,gs.config),cx=p.x+p.w/2,cy=p.y+p.h/2;
+      const dx=cx-e.x,dy=cy-e.y,d=Math.hypot(dx,dy),move=gs.paddles[s]-gs.paddlesPrev[s];
+      const oldD=Math.hypot(dx-(s<2?move:0),dy-(s<2?0:move));
+      const a=Math.atan2(dy,dx)-e.angle,diff=Math.abs(Math.atan2(Math.sin(a),Math.cos(a)));
+      if(d-p.radius<=radius&&oldD+p.radius>=previous&&diff<=EMP_HALF_ANGLE+Math.asin(Math.min(1,p.radius/Math.max(p.radius,d)))){
+        e.hitMask|=1<<s;disableAbilities(gs,s,e.owner);
+      }
+    }
+  }
+}
+function reflectShield(gs,s,b){
+  const g=goalGeometry(s),dot=b.vx*g.nx+b.vy*g.ny;
+  if(dot<0){
+    const incoming=Math.hypot(b.vx,b.vy),speed=clamp(incoming*SHIELD_BOUNCE_GAIN,SHIELD_MIN_SPEED,SHIELD_MAX_SPEED);
+    // A single kick at contact, with a minimum inward angle so grazing shots
+    // leave the goal decisively. Repeated hits cannot accumulate unbounded speed.
+    const tx=-g.ny,ty=g.nx,tangent=b.vx*tx+b.vy*ty;
+    const normal=Math.max(SHIELD_MIN_NORMAL,-dot/Math.max(.000001,incoming));
+    const along=Math.sign(tangent)*Math.sqrt(Math.max(0,1-normal*normal));
+    b.vx=(g.nx*normal+tx*along)*speed;b.vy=(g.ny*normal+ty*along)*speed;
+  }
+  if(s<2)b.y=s===0?H-BR-.01:BR+.01;else b.x=s===2?BR+.01:W-BR-.01;
+  b.contact=(b.contact||0)+1;gs.shieldHits[s]={tick:gs.tick,x:round(b.x),y:round(b.y)};
+  emit(gs,'shield:hit',{slot:s,ballId:b.id,tick:gs.tick});
+}
+
 function queueBall(gs,delay) {
   const ang=(random(gs)*.6+.2)*Math.PI*(random(gs)<.5?1:-1)+(random(gs)<.5?0:Math.PI);
   const speed=2.5+random(gs)*.5;
@@ -397,8 +478,10 @@ function create(options={}) {
     paddles:arr(260),paddlesPrev:arr(260),balls:[],respawns:[],lives:arr(ML),scores:arr(0),
     energy:arr(1),fields:arr(()=>({active:false,t:0,r:0,maxR:FR})),magEnergy:arr(1),magnet:arr(false),magPressed:arr(false),
     eliminated:SLOTS.map(s=>!config.activeSlots.includes(s)),eliminationOrder:[],connected:SLOTS.map(s=>config.activeSlots.includes(s)),botTargets:arr(260),
-    inputs:arr(()=>({tick:0,dx:0,magnet:false,boost:0,target:null,rocket:0,rocketTarget:-1})),lastBoost:arr(0),
+    inputs:arr(()=>({tick:0,dx:0,magnet:false,boost:0,target:null,rocket:0,rocketTarget:-1,shield:0,emp:0,empX:null,empY:null})),lastBoost:arr(0),
     missiles:[],nextMissileId:1,lastRocket:arr(0),rocketReadyAt:arr(0),stunUntil:arr(0),bayOpenAt:arr(-10000),gameOver:false,winner:null,
+    goalShields:arr(null),shieldHits:arr(null),lastShield:arr(0),shieldReadyAt:arr(0),
+    empWaves:[],nextEmpId:1,lastEmp:arr(0),empReadyAt:arr(0),empUntil:arr(0),
     teamLives:mode==='team'?[20,20]:null,teamScores:mode==='team'?[0,0]:null,winnerTeam:null,endReason:null,events:[]};
   if(mode==='team')gs.lives=arr(20);
   for(let i=0;i<4;i++)queueBall(gs,(options.spawnDelayMs??8000)+i*2000);
@@ -407,7 +490,7 @@ function create(options={}) {
 function eliminate(gs,s,reason) {
   if(gs.eliminated[s])return;
   gs.eliminated[s]=true;gs.lives[s]=0;gs.eliminationOrder.push(s);
-  gs.fields[s].active=false;gs.fields[s].r=0;gs.magnet[s]=false;
+  gs.fields[s].active=false;gs.fields[s].r=0;gs.magnet[s]=false;gs.goalShields[s]=null;
   let i=0;for(const b of gs.balls)if(b['mag_held_'+s])releaseMagnetBall(gs,s,b,i++,gs.config);
   emit(gs,'eliminated',{slot:s,reason,tick:gs.tick});
 }
@@ -464,30 +547,30 @@ function step(gs,commands={},systems=[]) {
   gs.paddlesPrev=gs.paddles.slice();
   for(const sys of systems){const s=sys.slot;if(!SLOTS.includes(s))continue;
     if(sys.type==='eliminate')eliminate(gs,s,sys.reason||'leave');
-    if(sys.type==='connected'){gs.connected[s]=!!sys.value;gs.inputs[s]={tick:gs.tick,dx:0,magnet:false,boost:gs.lastBoost[s],target:null,rocket:gs.lastRocket[s],rocketTarget:-1};}}
+    if(sys.type==='connected'){gs.connected[s]=!!sys.value;gs.inputs[s]={tick:gs.tick,dx:0,magnet:false,boost:gs.lastBoost[s],target:null,rocket:gs.lastRocket[s],rocketTarget:-1,shield:gs.lastShield[s],emp:gs.lastEmp[s],empX:null,empY:null};}}
   for(const s of SLOTS){
     if(gs.eliminated[s])continue;
     const stats=gs.config.players[s].paddleStats,f=gs.fields[s];
     if(f.active){f.t=round(f.t+TICK_MS);f.r=Math.min(f.maxR,f.t/200*f.maxR);
       if(f.t>=FDR*stats.fd){f.active=false;f.t=0;f.r=0;for(const b of gs.balls)delete b['ff_hit_'+s];}}
-    else gs.energy[s]=Math.min(1,gs.energy[s]+ECR*TICK_MS*stats.er);
+    else if(!abilitiesLocked(gs,s))gs.energy[s]=Math.min(1,gs.energy[s]+ECR*TICK_MS*stats.er);
     let input=commands[s];
     if(gs.config.players[s].bot)input=botInput(gs,s);
-    if(input)gs.inputs[s]={tick:gs.tick,dx:clamp(input.dx||0,-1,1),magnet:!!input.magnet,boost:input.boost||0,target:Number.isFinite(input.target)?clamp(input.target,0,W):null,rocket:input.rocket||0,rocketTarget:input.rocketTarget??-1};
+    if(input)gs.inputs[s]={tick:gs.tick,dx:clamp(input.dx||0,-1,1),magnet:!!input.magnet,boost:input.boost||0,target:Number.isFinite(input.target)?clamp(input.target,0,W):null,rocket:input.rocket||0,rocketTarget:input.rocketTarget??-1,shield:input.shield||0,emp:input.emp||0,empX:input.empX??null,empY:input.empY??null};
     input=gs.inputs[s];
     // An absent client cannot keep moving/holding magnet indefinitely.
     const fresh=gs.connected[s]&&gs.tick-input.tick<=8;
     const wanted=input.target===null?input.dx*stats.spd:clamp(input.target-gs.paddles[s],-stats.spd,stats.spd);
     gs.paddles[s]=round(clamp(gs.paddles[s]+(fresh&&gs.tick>=gs.stunUntil[s]?wanted:0),C+stats.w/2,W-C-stats.w/2));
-    requestRocket(gs,s,input,fresh);
+    requestRocket(gs,s,input,fresh);requestShield(gs,s,input,fresh);requestEMP(gs,s,input,fresh);
     if(input.boost>gs.lastBoost[s]){gs.lastBoost[s]=input.boost;
-      if(fresh&&!f.active&&gs.energy[s]>=EPU){f.active=true;f.t=0;f.r=0;f.maxR=stats.fr;gs.energy[s]-=EPU;
+      if(fresh&&!abilitiesLocked(gs,s)&&!f.active&&gs.energy[s]>=EPU){f.active=true;f.t=0;f.r=0;f.maxR=stats.fr;gs.energy[s]-=EPU;
         emit(gs,'event:field',{type:'activate',slot:s,tick:gs.tick,paddleX:gs.paddles[s],maxR:f.maxR});}}
     if(updateMagnetEnergy(gs,s,fresh&&input.magnet)){
       let i=0;for(const b of gs.balls)if(b['mag_held_'+s])releaseMagnetBall(gs,s,b,i++,gs.config);
     }
   }
-  stepRockets(gs);
+  stepEMPs(gs);stepRockets(gs);
   for(let i=gs.respawns.length-1;i>=0;i--){const r=gs.respawns[i];r.timer=round(r.timer-TICK_MS);
     if(r.timer<=.0001){gs.balls.push({id:gs.nextBallId++,x:260,y:260,vx:r.vx,vy:r.vy,contact:0});gs.respawns.splice(i,1);}}
   for(let i=gs.balls.length-1;i>=0;i--){const b=gs.balls[i],old={x:b.x,y:b.y};
@@ -506,7 +589,7 @@ function step(gs,commands={},systems=[]) {
         else if(b.y+BR>H&&b.x>C&&b.x<W-C)goal=0;
         else if(b.x-BR<0&&b.y>C&&b.y<H-C)goal=2;
         else if(b.x+BR>W&&b.y>C&&b.y<H-C)goal=3;
-        if(goal>=0){if(gs.eliminated[goal]&&gs.config.mode!=='team'){
+        if(goal>=0){if(shieldActive(gs,goal)){reflectShield(gs,goal,b);}else if(gs.eliminated[goal]&&gs.config.mode!=='team'){
           if(goal<2)b.y=goal===0?H-BR:BR;else b.x=goal===2?BR:W-BR;
           if(!gs.config.activeSlots?.includes(goal)&&gs.config.mode==='duel'){if(goal<2)b.vy=-b.vy;else b.vx=-b.vx;}
           else applyEliminatedWall(gs,goal,b,gs.config);b.contact=(b.contact||0)+1;
@@ -533,5 +616,5 @@ function copyPhysics(value){
 function checkpoint(gs){const out={};for(const key of Object.keys(gs))out[key]=key==='events'?[]:copyPhysics(gs[key]);return out;}
 function hash(gs){const s=checkpoint(gs),str=JSON.stringify(s);let h=2166136261;
   for(let i=0;i<str.length;i++)h=Math.imul(h^str.charCodeAt(i),16777619);return (h>>>0).toString(16);}
-return {VERSION,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall,circleSweep,enemyTarget,rocketMuzzle,constants:{C,W,H,ROCKET_RELOAD,ROCKET_STUN,ROCKET_OPEN}};
+return {VERSION,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall,circleSweep,enemyTarget,rocketMuzzle,abilitiesLocked,goalGeometry,shieldActive,constants:{C,W,H,ROCKET_RELOAD,ROCKET_STUN,ROCKET_OPEN,SHIELD_DURATION,SHIELD_DEPLOY,ABILITY_RELOAD,EMP_LOCK,EMP_CHARGE,EMP_SPEED,EMP_RANGE,EMP_HALF_ANGLE}};
 });
