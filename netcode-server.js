@@ -57,7 +57,7 @@ function prepare(room,{io,getPlayer,endGame,onAbort}){
     const player=getPlayer(room,s),bot=room.bots[s];
     return {bot:!!bot&&!player,paddleStats:player?.paddleStats||Fleet.stats(0)};
   });
-  const world=P.create({players,mode:room.mode||'ranked',seed:randomBytes(4).readUInt32LE(0)});
+  const world=P.create({players,emptyStartEnergy:true,mode:room.mode||'ranked',seed:randomBytes(4).readUInt32LE(0)});
   // Two simulation workers isolate auth/database/dashboard work from physics.
   const worker=pool.length<2?makeWorker():pool.reduce((a,b)=>a.matchIds.size<=b.matchIds.size?a:b);
   const net=room.net2={room,io,endGame,onAbort,worker,rate:new Map(),sync:new Map(),metrics:{},lastSecond:-1};

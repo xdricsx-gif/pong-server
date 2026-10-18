@@ -2032,6 +2032,7 @@ function startCountdown(room) {
 }
 
 io.on('connection', (socket) => {
+  require('./economy-service').attach(socket,db);
   let myRoom = null, mySlot = null;
 
   socket.on('paddle:stats',({slot,paddleStats})=>{
@@ -2628,65 +2629,7 @@ function registerShopHandlers(socket) {
   // Інкрементує sub на 1. Сервер сам обчислює рівень+sublevel з sub.
   // На відміну від upgrade_hangar — не вимагає вибору параметра.
   // ═══════════════════════════════════════════════════════
-  socket.on('shop:upgrade_next', async ({ paddleId, fleetVersion }) => {
-    if (!db) return socket.emit('shop:error', { msg: 'server_unavailable' });
-    if (!socket.uid) return socket.emit('shop:error', { msg: 'auth_required' });
-    if (fleetVersion !== UfoFleet.VERSION) return socket.emit('shop:error', {msg:'update_required'});
-    const pid = Number(paddleId);
-    if (!Number.isFinite(pid) || pid !== 0) return socket.emit('shop:error', { msg: 'invalid_paddle' });
-
-    const privRef = db.collection('users_private').doc(socket.uid);
-
-    try {
-      const result = await db.runTransaction(async (tx) => {
-        const privSnap = await tx.get(privRef);
-        if (!privSnap.exists) throw { code: 'user_not_found' };
-        const priv = privSnap.data();
-
-        const currentSub = UfoFleet.clampSub(priv.ufoHangar?.sub);
-        if (currentSub >= MAX_SUB_SRV) throw { code: 'max_sublevel' };
-
-        const newSub = currentSub + 1;
-        // Cost = ціна *цільового* sub з врахуванням класу корабля
-        // (нижчі класи у рази дешевші — E у 15× дешевший за A)
-        const cost = getUpgradeCostSrv(pid, newSub);
-        if (!cost) throw { code: 'invalid_sublevel' };
-
-        const silver = priv.silver || 0;
-        const gold   = priv.gold   || 0;
-        if (cost.cur === 'silver' && silver < cost.price) throw { code: 'not_enough_silver' };
-        if (cost.cur === 'gold'   && gold   < cost.price) throw { code: 'not_enough_gold' };
-
-        // Записуємо тільки sub (нове поле). Старі поля {w,spd,...} залишаються
-        // незмінними у БД для backward compatibility, але більше не використовуються
-        const upd = {};
-        upd['ufoHangar.sub'] = newSub;
-        let newSilver = silver, newGold = gold;
-        if (cost.cur === 'silver') { upd.silver = silver - cost.price; newSilver = upd.silver; }
-        if (cost.cur === 'gold')   { upd.gold   = gold   - cost.price; newGold   = upd.gold; }
-
-        tx.update(privRef, upd);
-        const info = subToLevelSrv(newSub);
-        return { paddleId: pid, newSub, level: info.level, sublevel: info.sublevel, silver: newSilver, gold: newGold, cur: cost.cur };
-      });
-
-      socket.emit('shop:upgraded_next', {
-        paddleId: result.paddleId,
-        sub: result.newSub,
-        level: result.level,
-        sublevel: result.sublevel,
-        ...(result.cur === 'silver' ? { silver: result.silver } : { gold: result.gold }),
-      });
-      trackEvent('purchase', {
-        uid: socket.uid, kind: 'hangar_sub', item: `${result.paddleId}:sub:${result.newSub}`,
-        amount: getUpgradeCostSrv(result.paddleId, result.newSub)?.price, cur: result.cur,
-      });
-    } catch(e) {
-      if (e && e.code) { socket.emit('shop:error', { msg: e.code }); return; }
-      console.error('shop:upgrade_next', e.message);
-      socket.emit('shop:error', { msg: 'server_error' });
-    }
-  });
+  socket.on('shop:upgrade_next',()=>socket.emit('shop:error',{msg:'update_required'}));
 
   // ── Купівля енергії ──
   socket.on('shop:buy_energy', async () => {
@@ -2747,7 +2690,9 @@ function registerShopHandlers(socket) {
       const todayUTC = new Date().toISOString().slice(0, 10);
       // Чи був claim сьогодні
       const todayClaimed = (data.lastClaimDate === todayUTC);
+      const missionSnap=await db.collection('users_private').doc(socket.uid).get();
       socket.emit('daily:state', {
+        missions:missionSnap.data()?.dailyMissions||null,
         date: todayUTC,
         todayClaimed,
         streakDay: data.streakDay || 0, // 0 = ніколи не клеймили

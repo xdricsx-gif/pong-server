@@ -131,3 +131,32 @@ test('successive snapshots preserve the unfinished visual correction without res
   c.world.balls[0].contact++;
   assert.equal(c.sample(145).balls[0].x,250,'a new collision invalidates the old visual offset');
 });
+
+
+test('a stalled authority never receives client commands beyond its accepted future window',()=>{
+ const a=authority(),sent=[],c=new Client({slot:0,matchId:'test',epoch:0,send:p=>sent.push(p)});
+ c.setRtt(80);c.receive(a.snapshot(),0);c.setInput({dx:1});
+ for(let now=0;now<400;now+=17)c.advance(now);
+ for(const p of sent)a.receive(0,p);
+ assert.equal(a.metrics.rejected,0,'prediction must stay inside the authority future window');
+ assert.ok(sent.length>0);
+});
+
+test('short automatic resync preserves remote hull position while authority remains exact',()=>{
+ const a=authority(),c=new Client({slot:0,matchId:'test',epoch:0});c.setRtt(0);c.receive(a.snapshot(),0);
+ const before=c.sample(420).paddles[1];c.advance(421);assert.equal(c.needsSync,true);
+ a.world.paddles[1]+=35;a.history.set(0,P.checkpoint(a.world));
+ c.receive(a.snapshot(),430);
+ assert.equal(c.world.paddles[1],before+35);
+ assert.ok(Math.abs(c.sample(430).paddles[1]-before)<4,'resync must not teleport the visible hull');
+ assert.ok(Math.abs(c.sample(550).paddles[1]-(before+35))<.01);
+});
+
+test('small own-paddle reconciliation is visual only and settles within 100ms',()=>{
+ const a=authority(),c=new Client({slot:0,matchId:'test',epoch:0});c.setRtt(0);c.receive(a.snapshot(),0);
+ c.world.paddles[0]+=15;c.previous.paddles[0]+=15;
+ const before=c.sample(10).paddles[0];c.receive(a.snapshot(),10);
+ assert.equal(c.world.paddles[0],a.world.paddles[0]);
+ assert.equal(c.sample(10).paddles[0],before);
+ assert.equal(c.sample(111).paddles[0],a.world.paddles[0]);
+});

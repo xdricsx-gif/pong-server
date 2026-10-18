@@ -55,6 +55,7 @@ function createLedger({db,owner,now=Date.now}){
       if(!w||!u)throw fail('account_missing');const r=result.rewards[p.slot];
       if(!r||!Number.isSafeInteger(r.silver)||r.silver<0)throw fail('invalid_reward');
       const wallet={silver:number(w.silver)+r.silver,xp:number(w.xp)+r.xp};
+      if(d.mode!=='duel'&&!result.draw&&!result.aborted&&now()-d.createdAt>=60000){const day=new Date(now()).toISOString().slice(0,10),q=w.dailyMissions?.day===day?w.dailyMissions:{day,games:0,wins:0,claimed:{}};wallet.dailyMissions={...q,games:Math.min(3,(q.games||0)+1),wins:Math.min(1,(q.wins||0)+(r.place===0?1:0))};}
       if(w.activeMatchId===id)wallet.activeMatchId=null;
       if(result.aborted&&d.energyCost)wallet.energy=Math.min(100,number(w.energy)+d.energyCost);
       const updates=r.xp?{xp:wallet.xp}:{};

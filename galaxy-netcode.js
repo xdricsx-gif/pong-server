@@ -5,7 +5,7 @@
 (function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory(require('./galaxy-physics.js'));
 else root.GalaxyNetcode=factory(root.GalaxyPhysics);})(typeof globalThis!=='undefined'?globalThis:this,function(P){
 'use strict';
-const WINDOW=8,FUTURE=14,MAX_PREDICT=20,HISTORY=64,DT=P.TICK_MS;
+const WINDOW=8,FUTURE=14,MAX_PREDICT=FUTURE,HISTORY=64,DT=P.TICK_MS;
 const copy=P.clone,clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
 const validInt=x=>Number.isSafeInteger(x)&&x>=0;
 class Authority {
@@ -99,10 +99,11 @@ class Client {
     this.anchorTime=0;this.anchorTick=0;this.rtt=100;this.lastReceived=0;this.lastSent=-Infinity;
     this.clockOffset=null;this.clockSamples=[];this.hasAnchor=false;this.lastCorrection=[];
     this.remoteCommands=new Map();this.systemEvents=new Map();
+    this.waitReason=null;this.lastAdvanceAt=null;
     this.lastSyncRequest=-Infinity;this.resumeRequested=false;
     this.paused=false;this.needsSync=false;this.corrections=new Map();this.paddleCorrections=new Map();this.remotePresentation=new Map();
     this.metrics={snapshots:0,staleSnapshots:0,reconciliations:0,softCorrections:0,hardCorrections:0,
-      maxCorrection:0,predictionStops:0,maxPending:0,ownPaddleCorrections:0,maxOwnPaddleCorrection:0,replayedLocalPastInputs:0};
+      maxCorrection:0,predictionStops:0,predictionCapFrames:0,predictionCapMs:0,waitingSnapshotMs:0,maxPending:0,ownPaddleCorrections:0,maxOwnPaddleCorrection:0,replayedLocalPastInputs:0};
   }
   setInput({dx=0,magnet=false,boost=false,target=null}){
     this.input={dx:clamp(dx,-1,1),magnet:!!magnet,target:Number.isFinite(target)?clamp(target,0,520):null};if(boost)this.boostQueued=true;
@@ -142,6 +143,8 @@ class Client {
     const before=this.world?P.checkpoint(this.world):null,oldTick=before?.tick||packet.world.tick;
     const priorEstimate=this.anchorTick+(now-this.anchorTime)/DT;
     const resync=this.needsSync;
+    // Short delivery gaps are not a new session: retain presentation continuity.
+    const resetPresentation=this.resumeRequested||this.paused||(resync&&now-this.lastReceived>1000);
     this.latestId=packet.id;this.base=P.checkpoint(packet.world);this.confirmed=copy(packet.confirmed);this.lastReceived=now;
     const age=this.clockOffset!==null&&Number.isFinite(packet.sentAt)?clamp(now+this.clockOffset-packet.sentAt,0,500):this.rtt/2;
     const estimate=this.base.tick+age/DT+(packet.phase||0);
@@ -197,14 +200,16 @@ class Client {
     // This is a render-only offset: collision state and input prediction stay exact.
     // Smooth only the correction, not normal movement, so velocity has no permanent lag.
     this.paddleCorrections.clear();
-    if(resync)this.remotePresentation.clear();
-    if(displayedBefore&&!resync&&!this.paused){
+    if(resetPresentation)this.remotePresentation.clear();
+    if(displayedBefore&&!resetPresentation){
       const alpha=clamp(this.desiredTick(now)-this.world.tick,0,1);
       for(const slot of P.SLOTS){
-        if(slot===this.slot||this.world.eliminated[slot]||displayedBefore.eliminated[slot])continue;
+        if(this.world.eliminated[slot]||displayedBefore.eliminated[slot])continue;
         const raw=this.previous.paddles[slot]+(this.world.paddles[slot]-this.previous.paddles[slot])*alpha;
         const offset=displayedBefore.paddles[slot]-raw;
-        if(Math.abs(offset)>.001&&Math.abs(offset)<80)this.paddleCorrections.set(slot,{offset,time:now});
+        // Small local corrections also ease out, without delaying fresh input or changing collisions.
+        const limit=slot===this.slot?40:80;
+        if(Math.abs(offset)>.001&&Math.abs(offset)<limit)this.paddleCorrections.set(slot,{offset,time:now});
       }
     }
     return true;
@@ -213,15 +218,18 @@ class Client {
   // The bounded server rewind absorbs delayed uplink instead of predicting a full RTT ahead.
   desiredTick(now){return this.anchorTick+(now-this.anchorTime)/DT+2+Math.ceil(Math.max(0,this.rtt-140)/(2*DT));}
   advance(now){
+    const elapsed=this.lastAdvanceAt===null?0:clamp(now-this.lastAdvanceAt,0,1000);this.lastAdvanceAt=now;this.waitReason=null;
     if(!this.world||this.paused)return;
     if(this.needsSync){
+      this.waitReason='synchronizing';this.metrics.waitingSnapshotMs+=elapsed;
       if(this.lastSyncRequest===null)this.lastSyncRequest=now;
       else if(now-this.lastSyncRequest>=1000)this.requestSynchronization(now,this.resumeRequested);
       return;
     }
     // A long outage suspends prediction instead of inventing seconds of collisions.
-    if(now-this.lastReceived>400){if(!this.needsSync){this.metrics.predictionStops++;this.needsSync=true;this.requestSynchronization(now);}return;}
+    if(now-this.lastReceived>400){this.waitReason='snapshot-gap';this.metrics.waitingSnapshotMs+=elapsed;if(!this.needsSync){this.metrics.predictionStops++;this.needsSync=true;this.requestSynchronization(now);}return;}
     const target=Math.min(Math.floor(this.desiredTick(now)),this.base.tick+MAX_PREDICT);
+    if(Math.floor(this.desiredTick(now))>this.base.tick+MAX_PREDICT&&this.world.tick>=target){this.waitReason='prediction-limit';this.metrics.predictionCapFrames++;this.metrics.predictionCapMs+=elapsed;}
     let steps=0;
     while(this.world.tick<target&&steps++<MAX_PREDICT){
       const t=this.world.tick+1;

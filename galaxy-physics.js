@@ -6,7 +6,7 @@
 else root.GalaxyPhysics=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 
-const VERSION='gf-net2-10';
+const VERSION='gf-net2-11';
 // Rollback switch: new matches may opt out with cornerLaunches:false.
 const CORNER_LAUNCHES=false;
 function launchOrigin(vx,vy){const speed=Math.hypot(vx,vy)||1;return {x:(vx<0?520:0)+vx/speed*64,y:(vy<0?520:0)+vy/speed*64};}
@@ -16,7 +16,9 @@ const SLOTS=[0,1,2,3],SLOT_VIEW=['bottom','top','left','right'];
 const ELIM_WALL_BOOST=1.30,ELIM_WALL_RANDOM_DEG=25,ELIM_WALL_MIN_SP=3.5,ELIM_WALL_MAX_SP=6.5;
 const MAG_R=75,MAG_PULL_FORCE=1.15,MAG_CAPTURE_RADIUS=3,MAG_RELEASE_PUSH=SMAX;
 const MAG_DRAIN_PER_MS=1/5000,MAG_REGEN_PER_MS=1/10000,MAG_START_COST=.20;
-function magnetRadius(stats){return clamp(MAG_R*(stats?.fr||FR)/FR,40,250);}
+function skillProgress(gs,s,key){return Math.max(0,Math.min(4,(gs.config.players[s].paddleStats.skills?.[key]||1)-1))/4;}
+function skillCost(gs,s,key){const base={push:EPU,magnet:.20,rocket:.30,shield:.40,emp:.50,cloak:.40}[key];return base*(1-({push:.10,emp:.08,cloak:.10}[key]||0)*skillProgress(gs,s,key));}
+function magnetRadius(stats){return clamp(MAG_R*(stats?.skills?1+.12*((stats.skills.magnet||1)-1)/4:(stats?.fr||FR)/FR),40,250);}
 function magnetGeometry(s,p,stats){
   const nx=s===2?1:s===3?-1:0,ny=s===0?-1:s===1?1:0;
   const half=(s<2?p.w:p.h)/2,depth=(s<2?p.h:p.w)/2+BR+1;
@@ -29,7 +31,7 @@ function updateMagnetEnergy(gs,s,want,dt=TICK_MS){
   if(abilitiesLocked(gs,s)){gs.magnet[s]=false;gs.magEnergy[s]=gs.energy[s]=0;return was;}
   let active=was&&want&&gs.energy[s]>0;
   if(pressed&&!was&&spendEnergy(gs,s,.20)){active=true;gs.cloakUntil[s]=0;}
-  if(active){gs.energy[s]=round(Math.max(0,gs.energy[s]-MAG_DRAIN_PER_MS*dt));active=gs.energy[s]>0;}
+  if(active){gs.energy[s]=round(Math.max(0,gs.energy[s]-MAG_DRAIN_PER_MS*dt*(1-.10*skillProgress(gs,s,'magnet'))));active=gs.energy[s]>0;}
   gs.magEnergy[s]=gs.energy[s];gs.magnet[s]=!!active;return was&&!active;
 }
 
@@ -355,7 +357,7 @@ function requestRocket(gs,s,input,fresh){
   if(!fresh||abilitiesLocked(gs,s)||gs.tick<gs.rocketReadyAt[s]||!enemyTarget(gs,s,input.rocketTarget))return;
   if(!spendEnergy(gs,s,.30))return;gs.cloakUntil[s]=0;
   const launchAt=gs.tick+ROCKET_OPEN;
-  gs.rocketReadyAt[s]=launchAt+ROCKET_RELOAD;gs.bayOpenAt[s]=gs.tick;
+  gs.rocketReadyAt[s]=launchAt+Math.round(ROCKET_RELOAD*(1-.10*skillProgress(gs,s,'rocket')));gs.bayOpenAt[s]=gs.tick;
   const muzzle=rocketMuzzle(gs,s);
   gs.missiles.push({id:gs.nextMissileId++,owner:s,target:input.rocketTarget,launchAt,age:0,...muzzle});
   emit(gs,'rocket:armed',{slot:s,target:input.rocketTarget,tick:gs.tick});
@@ -387,8 +389,8 @@ const EMP_LOCK=10*TICK_RATE,EMP_CHARGE=30,EMP_SPEED=7,EMP_RANGE=780,EMP_HALF_ANG
 function spendEnergy(gs,s,cost){if(abilitiesLocked(gs,s)||gs.energy[s]+1e-9<cost)return false;gs.energy[s]=round(Math.max(0,gs.energy[s]-cost));gs.magEnergy[s]=gs.energy[s];return true;}
 function requestCloak(gs,s,input,fresh){
  const seq=input.cloak||0;if(seq<=gs.lastCloak[s])return;gs.lastCloak[s]=seq;
- if(!fresh||gs.tick<gs.cloakReadyAt[s]||!spendEnergy(gs,s,.40))return;
- gs.cloakUntil[s]=gs.tick+600;gs.cloakReadyAt[s]=gs.tick+1800;
+ if(!fresh||gs.tick<gs.cloakReadyAt[s]||!spendEnergy(gs,s,skillCost(gs,s,'cloak')))return;
+ gs.cloakUntil[s]=gs.tick+600;gs.cloakReadyAt[s]=gs.tick+1800-Math.round(120*skillProgress(gs,s,'cloak'));
  emit(gs,'cloak:activate',{slot:s,tick:gs.tick});
 }
 function cloaked(gs,s){return !gs.eliminated[s]&&gs.tick<(gs.cloakUntil?.[s]||0);}
@@ -403,7 +405,7 @@ function requestShield(gs,s,input,fresh){
   const seq=input.shield||0;if(seq<=gs.lastShield[s])return;gs.lastShield[s]=seq;
   if(!fresh||abilitiesLocked(gs,s)||gs.tick<gs.shieldReadyAt[s]||!spendEnergy(gs,s,.40))return;
   const p=slotToPaddle(s,gs.paddles[s],gs,gs.config);
-  gs.goalShields[s]={startTick:gs.tick,activeAt:gs.tick+SHIELD_DEPLOY,until:gs.tick+SHIELD_DEPLOY+SHIELD_DURATION,x:p.x+p.w/2,y:p.y+p.h/2};
+  gs.goalShields[s]={startTick:gs.tick,activeAt:gs.tick+SHIELD_DEPLOY,until:gs.tick+SHIELD_DEPLOY+SHIELD_DURATION+Math.round(60*skillProgress(gs,s,'shield')),x:p.x+p.w/2,y:p.y+p.h/2};
   gs.shieldReadyAt[s]=gs.tick+ABILITY_RELOAD;
   emit(gs,'shield:launch',{slot:s,tick:gs.tick});
 }
@@ -413,9 +415,9 @@ function requestEMP(gs,s,input,fresh){
   if(!fresh||abilitiesLocked(gs,s)||gs.tick<gs.empReadyAt[s]||!Number.isFinite(input.empX)||!Number.isFinite(input.empY))return;
   const p=slotToPaddle(s,gs.paddles[s],gs,gs.config),x=p.x+p.w/2,y=p.y+p.h/2,dx=input.empX-x,dy=input.empY-y;
   const g=goalGeometry(s);if(Math.hypot(dx,dy)<8||dx*g.nx+dy*g.ny<=0)return;
-  if(!spendEnergy(gs,s,.50))return;gs.cloakUntil[s]=0;
+  if(!spendEnergy(gs,s,skillCost(gs,s,'emp')))return;gs.cloakUntil[s]=0;
   gs.empWaves.push({id:gs.nextEmpId++,owner:s,x,y,angle:round(Math.atan2(dy,dx)),startTick:gs.tick,hitMask:0});
-  gs.empReadyAt[s]=gs.tick+ABILITY_RELOAD;
+  gs.empReadyAt[s]=gs.tick+ABILITY_RELOAD-Math.round(120*skillProgress(gs,s,'emp'));
   emit(gs,'emp:charge',{slot:s,tick:gs.tick});
 }
 function disableAbilities(gs,s,owner){
@@ -480,14 +482,15 @@ function create(options={}) {
   const mode=['ranked','team','duel','training'].includes(options.mode)?options.mode:'ranked';
   const config={players:[],mode,activeSlots:mode==='duel'?[0,1]:[0,1,2,3],teams:mode==='team'?[0,1,1,0]:null,durationTicks:options.durationTicks||10800};
   config.cornerLaunches=options.cornerLaunches??CORNER_LAUNCHES;
+  config.emptyStartEnergy=!!options.emptyStartEnergy;
   const arr=v=>SLOTS.map(()=>typeof v==='function'?v():v);
   for(const s of SLOTS){const p=options.players?.[s]||{},st=p.paddleStats||{};
-    config.players[s]={bot:!!p.bot,paddleStats:{level:clamp(Math.trunc(st.level||1),1,5),w:clamp(st.w||PL,10,250),spd:clamp(st.spd||PS,.1,50),
-      fr:clamp(st.fr||FR,1,220),fd:clamp(st.fd||1,.1,20),er:clamp(st.er||1,.1,20)}};
+    config.players[s]={bot:!!p.bot,paddleStats:{shipId:['nexus','swift','bastion','flux'].includes(st.shipId)?st.shipId:'nexus',level:clamp(Math.trunc(st.level||1),1,5),w:clamp(st.w||PL,10,250),spd:clamp(st.spd||PS,.1,50),
+      fr:clamp(st.fr||FR,1,220),fd:clamp(st.fd||1,.1,20),er:clamp(st.er||1,.1,20),...(st.skills?{skills:Object.fromEntries(['push','magnet','rocket','shield','emp','cloak'].map(k=>[k,clamp(Math.trunc(Number(st.skills[k])||1),1,5)]))}:{})}};
   }
   const gs={version:VERSION,config,tick:0,rng:(options.seed??123456789)>>>0,nextBallId:1,
     paddles:arr(260),paddlesPrev:arr(260),balls:[],respawns:[],lives:arr(ML),scores:arr(0),
-    energy:arr(1),fields:arr(()=>({active:false,t:0,r:0,maxR:FR})),magEnergy:arr(1),magnet:arr(false),magPressed:arr(false),
+    energy:arr(config.emptyStartEnergy?0:1),fields:arr(()=>({active:false,t:0,r:0,maxR:FR})),magEnergy:arr(config.emptyStartEnergy?0:1),magnet:arr(false),magPressed:arr(false),
     eliminated:SLOTS.map(s=>!config.activeSlots.includes(s)),eliminationOrder:[],connected:SLOTS.map(s=>config.activeSlots.includes(s)),botTargets:arr(260),
     inputs:arr(()=>({tick:0,dx:0,magnet:false,boost:0,target:null,rocket:0,rocketTarget:-1,shield:0,emp:0,empX:null,empY:null,cloak:0})),lastBoost:arr(0),
     missiles:[],nextMissileId:1,lastRocket:arr(0),rocketReadyAt:arr(0),stunUntil:arr(0),bayOpenAt:arr(-10000),gameOver:false,winner:null,
@@ -582,12 +585,12 @@ function step(gs,commands={},systems=[]) {
     input=gs.inputs[s];
     // An absent client cannot keep moving/holding magnet indefinitely.
     const fresh=gs.connected[s]&&gs.tick-input.tick<=8;
-    if(!f.active&&!abilitiesLocked(gs,s)&&!(fresh&&input.magnet))gs.energy[s]=Math.min(1,gs.energy[s]+ECR*TICK_MS*stats.er);
+    if((!gs.config.emptyStartEnergy||gs.nextBallId>1)&&!f.active&&!abilitiesLocked(gs,s)&&!(fresh&&input.magnet))gs.energy[s]=Math.min(1,gs.energy[s]+ECR*TICK_MS*stats.er);
     const wanted=input.target===null?input.dx*stats.spd:clamp(input.target-gs.paddles[s],-stats.spd,stats.spd);
     gs.paddles[s]=round(clamp(gs.paddles[s]+(fresh&&gs.tick>=gs.stunUntil[s]?wanted:0),C+stats.w/2,W-C-stats.w/2));
     requestCloak(gs,s,input,fresh);requestRocket(gs,s,input,fresh);requestShield(gs,s,input,fresh);requestEMP(gs,s,input,fresh);
     if(input.boost>gs.lastBoost[s]){gs.lastBoost[s]=input.boost;
-      if(fresh&&!abilitiesLocked(gs,s)&&!f.active&&gs.energy[s]>=EPU){f.active=true;f.t=0;f.r=0;f.maxR=stats.fr;gs.energy[s]-=EPU;gs.cloakUntil[s]=0;
+      if(fresh&&!abilitiesLocked(gs,s)&&!f.active&&gs.energy[s]>=skillCost(gs,s,'push')){f.active=true;f.t=0;f.r=0;f.maxR=stats.fr;gs.energy[s]-=skillCost(gs,s,'push');gs.cloakUntil[s]=0;
         emit(gs,'event:field',{type:'activate',slot:s,tick:gs.tick,paddleX:gs.paddles[s],maxR:f.maxR});}}
     if(updateMagnetEnergy(gs,s,fresh&&input.magnet)){
       let i=0;for(const b of gs.balls)if(b['mag_held_'+s])releaseMagnetBall(gs,s,b,i++,gs.config);
@@ -639,5 +642,5 @@ function copyPhysics(value){
 function checkpoint(gs){const out={};for(const key of Object.keys(gs))out[key]=key==='events'?[]:copyPhysics(gs[key]);return out;}
 function hash(gs){const s=checkpoint(gs),str=JSON.stringify(s,(_key,value)=>value&&typeof value==='object'&&!Array.isArray(value)?Object.fromEntries(Object.keys(value).sort().map(k=>[k,value[k]])):value);let h=2166136261;
   for(let i=0;i<str.length;i++)h=Math.imul(h^str.charCodeAt(i),16777619);return (h>>>0).toString(16);}
-return {VERSION,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall,circleSweep,enemyTarget,rocketMuzzle,abilitiesLocked,cloaked,shipVisibility,goalGeometry,shieldActive,constants:{C,W,H,ROCKET_RELOAD,ROCKET_STUN,ROCKET_OPEN,SHIELD_DURATION,SHIELD_DEPLOY,ABILITY_RELOAD,EMP_LOCK,EMP_CHARGE,EMP_SPEED,EMP_RANGE,EMP_HALF_ANGLE}};
+return {skillCost,VERSION,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall,circleSweep,enemyTarget,rocketMuzzle,abilitiesLocked,cloaked,shipVisibility,goalGeometry,shieldActive,constants:{C,W,H,ROCKET_RELOAD,ROCKET_STUN,ROCKET_OPEN,SHIELD_DURATION,SHIELD_DEPLOY,ABILITY_RELOAD,EMP_LOCK,EMP_CHARGE,EMP_SPEED,EMP_RANGE,EMP_HALF_ANGLE}};
 });
