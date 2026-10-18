@@ -13,10 +13,16 @@ function makeWorker(){
     if(message.type==='state'){
       send(net,'snapshotAck');
       if(performance.now()-message.packet.sentAt>250)return;
-      room.game=message.packet.world;net.lastSnapshot=message.packet;
+      room.game=message.packet.world;net.lastSnapshot=message.packet;net.workerReceivedAt=performance.now();
       // Coalesce state after a main-thread stall instead of replaying a packet backlog.
       if(!net.flushQueued){net.flushQueued=true;setImmediate(()=>{
         net.flushQueued=false;if(room.status!=='playing'||!matches.has(room.id))return;
+        const emittedAt=performance.now();
+        // Opt-in timing accompanies this exact snapshot; never contains profile data.
+        for(const socketId of Object.keys(room.players)){
+          const peer=io.sockets.sockets.get(socketId);
+          if(peer?.data?.netDiagnostics)peer.volatile.emit('net:timing',{id:net.lastSnapshot.id,createdAt:net.lastSnapshot.sentAt,workerReceivedAt:net.workerReceivedAt,emittedAt,transport:peer.conn?.transport?.name||null,writable:!!peer.conn?.transport?.writable,buffered:peer.conn?.writeBuffer?.length||0});
+        }
         io.to(room.id).volatile.emit('net:state',Wire.snapshot(net.lastSnapshot));
         const second=Math.floor(room.game.tick/60);
         if(second!==net.lastSecond){net.lastSecond=second;room.matchTimeLeft=Math.max(0,(room.game.config.durationTicks-room.game.tick)*P.TICK_MS);

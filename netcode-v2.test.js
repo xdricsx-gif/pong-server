@@ -95,8 +95,8 @@ test('bounded memory and no rollback behind committed state',()=>{
 test('client ignores out of order snapshots and pauses on a long outage',()=>{
   const a=authority(),c=new Client({slot:0,matchId:'test',epoch:0});
   const first=a.snapshot();c.receive(first,0);a.advance();c.receive(a.snapshot(),17);
-  assert.equal(c.receive(first,20),false);c.advance(450);assert.ok(c.needsSync);assert.equal(c.metrics.predictionStops,1);
-  c.receive(a.snapshot(),500);c.advance(510);assert.ok(!c.needsSync);assert.ok(c.world.tick<=a.world.tick+20);
+  assert.equal(c.receive(first,20),false);c.advance(800);assert.ok(c.needsSync);assert.equal(c.metrics.predictionStops,1);
+  c.receive(a.snapshot(),850);c.advance(860);assert.ok(!c.needsSync);assert.ok(c.world.tick<=a.world.tick+20);
 });
 test('rendered held balls stay anchored to the same interpolated paddle',()=>{
   const w=world();w.balls=[{id:1,x:260,y:470,vx:0,vy:0,contact:0,mag_held_0:true,mag_offX_0:0,mag_offY_0:-40}];w.magnet[0]=true;
@@ -144,12 +144,12 @@ test('a stalled authority never receives client commands beyond its accepted fut
 
 test('short automatic resync preserves remote hull position while authority remains exact',()=>{
  const a=authority(),c=new Client({slot:0,matchId:'test',epoch:0});c.setRtt(0);c.receive(a.snapshot(),0);
- const before=c.sample(420).paddles[1];c.advance(421);assert.equal(c.needsSync,true);
+ const before=c.sample(760).paddles[1];c.advance(761);assert.equal(c.needsSync,true);
  a.world.paddles[1]+=35;a.history.set(0,P.checkpoint(a.world));
- c.receive(a.snapshot(),430);
+ c.receive(a.snapshot(),770);
  assert.equal(c.world.paddles[1],before+35);
- assert.ok(Math.abs(c.sample(430).paddles[1]-before)<4,'resync must not teleport the visible hull');
- assert.ok(Math.abs(c.sample(550).paddles[1]-(before+35))<.01);
+ assert.ok(Math.abs(c.sample(770).paddles[1]-before)<4,'resync must not teleport the visible hull');
+ assert.ok(Math.abs(c.sample(890).paddles[1]-(before+35))<.01);
 });
 
 test('small own-paddle reconciliation is visual only and settles within 100ms',()=>{
@@ -159,4 +159,15 @@ test('small own-paddle reconciliation is visual only and settles within 100ms',(
  assert.equal(c.world.paddles[0],a.world.paddles[0]);
  assert.equal(c.sample(10).paddles[0],before);
  assert.equal(c.sample(111).paddles[0],a.world.paddles[0]);
+});
+
+
+test('550ms downstream stall keeps simulation and input moving, then reconciles',()=>{
+ const a=authority(),c=new Client({slot:0,matchId:'test',epoch:0,send:p=>a.receive(0,p)});
+ c.setRtt(0);c.receive(a.snapshot(),0);c.setInput({dx:1});
+ for(let t=1;t<=33;t++){a.advance();c.advance(t*P.TICK_MS);}
+ assert.ok(c.world.tick>=33);assert.equal(c.needsSync,false);
+ assert.equal(a.metrics.rejected,0);assert.ok(a.metrics.accepted>20);
+ const before=c.world.tick;c.receive(a.snapshot(),550);assert.ok(c.world.tick>=before);
+ c.advance(1400);assert.equal(c.needsSync,true,'long outages still stop');
 });

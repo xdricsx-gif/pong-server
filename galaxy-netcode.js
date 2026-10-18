@@ -5,7 +5,7 @@
 (function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory(require('./galaxy-physics.js'));
 else root.GalaxyNetcode=factory(root.GalaxyPhysics);})(typeof globalThis!=='undefined'?globalThis:this,function(P){
 'use strict';
-const WINDOW=8,FUTURE=14,MAX_PREDICT=FUTURE,HISTORY=64,DT=P.TICK_MS;
+const WINDOW=8,FUTURE=36,MAX_PREDICT=FUTURE,HISTORY=64,DT=P.TICK_MS;
 const copy=P.clone,clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
 const validInt=x=>Number.isSafeInteger(x)&&x>=0;
 class Authority {
@@ -227,7 +227,7 @@ class Client {
       return;
     }
     // A long outage suspends prediction instead of inventing seconds of collisions.
-    if(now-this.lastReceived>400){this.waitReason='snapshot-gap';this.metrics.waitingSnapshotMs+=elapsed;if(!this.needsSync){this.metrics.predictionStops++;this.needsSync=true;this.requestSynchronization(now);}return;}
+    if(now-this.lastReceived>750){this.waitReason='snapshot-gap';this.metrics.waitingSnapshotMs+=elapsed;if(!this.needsSync){this.metrics.predictionStops++;this.needsSync=true;this.requestSynchronization(now);}return;}
     const target=Math.min(Math.floor(this.desiredTick(now)),this.base.tick+MAX_PREDICT);
     if(Math.floor(this.desiredTick(now))>this.base.tick+MAX_PREDICT&&this.world.tick>=target){this.waitReason='prediction-limit';this.metrics.predictionCapFrames++;this.metrics.predictionCapMs+=elapsed;}
     let steps=0;

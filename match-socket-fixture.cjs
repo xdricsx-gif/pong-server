@@ -12,7 +12,7 @@ function createFixture({graceMs=30000,rankedWaitMs=10000,memory=false}={}){
   for(const [id,p] of Object.entries(room.players)){io.to(id).emit('myslot',{mySlot:p.slot,roomId:room.id});net.init(room,io.sockets.sockets.get(id),p.slot);}
  }
  service=createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer,startGame,net,getDb:()=>f.db,authenticate:async({idToken})=>/^qa:[abcd]$/.test(idToken)?idToken.slice(3):null,loadStats:async()=>({w:54,spd:3.375,fr:54,fd:1,er:1,paddleId:0,avgUpgrade:0}),graceMs,rankedWaitMs});
- io.on('connection',s=>{s.on('np',c=>s.emit('np',{c,s:Date.now()}));s.on('net:ping',c=>s.emit('net:pong',{c,s:performance.now()}));service.attach(s);});
+ io.on('connection',s=>{s.on('net:diagnostics',enabled=>{s.data.netDiagnostics=enabled===true;});s.on('np',c=>s.emit('np',{c,s:Date.now()}));s.on('net:ping',c=>s.emit('net:pong',{c,s:performance.now()}));service.attach(s);});
  async function listen(port=0){await new Promise(r=>server.listen(port,'127.0.0.1',r));return 'http://127.0.0.1:'+server.address().port;}
  async function close(){service.close();for(const r of rooms.values())net.close(r);io.disconnectSockets(true);await new Promise(r=>io.close(r));await net.shutdown?.();}
  function client(){const c=io.client();service.attach(c.serverSocket);return c;}

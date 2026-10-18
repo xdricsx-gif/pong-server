@@ -2032,6 +2032,7 @@ function startCountdown(room) {
 }
 
 io.on('connection', (socket) => {
+  socket.on('net:diagnostics', enabled => {socket.data.netDiagnostics=enabled===true;});
   require('./economy-service').attach(socket,db);
   let myRoom = null, mySlot = null;
 
