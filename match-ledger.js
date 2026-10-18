@@ -17,10 +17,10 @@ function createLedger({db,owner,now=Date.now}){
     return db.runTransaction(async tx=>{
       const ref=session(id),old=await tx.get(ref);if(old.exists){const d=old.data();
         if(d.mode!==mode||JSON.stringify(d.roster)!==JSON.stringify(roster))throw fail('match_conflict');return d;}
-      const wallets=[],profiles=[];for(const p of roster){wallets.push(await tx.get(priv(p.uid)));profiles.push(await tx.get(pub(p.uid)));}
+      const wallets=[],profiles=[],controls=[];for(const p of roster){controls.push(await tx.get(db.collection('dashboard_admin_players').doc(p.uid)));wallets.push(await tx.get(priv(p.uid)));profiles.push(await tx.get(pub(p.uid)));}
       for(let i=0;i<roster.length;i++){
         if(!wallets[i].exists||!profiles[i].exists)throw fail('account_missing');
-        const w=wallets[i].data();if(w.activeMatchId)throw fail('already_playing');
+        const w=wallets[i].data();if(controls[i].data()?.banned)throw fail('account_blocked');if(w.activeMatchId)throw fail('already_playing');
         if(number(w.silver)<rule.stake)throw fail('not_enough_silver');
         const energy=Math.min(100,number(w.energy,100)+Math.floor(Math.max(0,now()-number(w.energyLastRegen,now()))/90000));
         if(energy<(rule.energy||0))throw fail('not_enough_energy');

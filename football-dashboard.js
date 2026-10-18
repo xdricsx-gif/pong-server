@@ -3,7 +3,8 @@ const fs=require('node:fs');const path=require('node:path');const {createHash}=r
 const {GoogleAuth}=require('google-auth-library');
 const {PACKAGE,day,parseInstalls,aggregateInstalls,summarizeOrders,validateReportUpload}=require('./dashboard-data');
 const PUBLIC_FIREBASE={apiKey:'AIzaSyCLri9CBFVYbdXzIuJ4QLc9Lm7YNkaD9Ac',authDomain:'crazy-footbal.firebaseapp.com',projectId:'crazy-footbal',appId:'1:348183694114:web:303c7ef63e5f0a857c337b'};
-function createDashboard({db,verifyIdToken,credentials,live,bucket=process.env.PLAY_REPORTS_BUCKET||'pubsite_prod_6971140736608519774',owner=process.env.DASHBOARD_OWNER_EMAIL||'xdricsx@gmail.com'}) {
+function createDashboard({db,verifyIdToken,credentials,live,onPlayerChanged,bucket=process.env.PLAY_REPORTS_BUCKET||'pubsite_prod_6971140736608519774',owner=process.env.DASHBOARD_OWNER_EMAIL||'xdricsx@gmail.com'}) {
+  const playerAdmin=require('./dashboard-admin').createAdmin({db,onChanged:async uid=>{cache.clear();await onPlayerChanged?.(uid);}});
   const storageAuth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/devstorage.read_only']});
   const playAuth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/androidpublisher']});
   const cache=new Map(); const rates=new Map(); let failureCount=0;
@@ -66,16 +67,24 @@ function createDashboard({db,verifyIdToken,credentials,live,bucket=process.env.P
   function send(res,status,data,type='application/json; charset=utf-8'){res.writeHead(status,{...headers,'Content-Type':type});res.end(type.startsWith('application/json')?JSON.stringify(data):data);}
   async function handle(req,res){
     const url=new URL(req.url,'http://local');
+    const adminRoute=url.pathname.startsWith('/dashboard/api/admin/');
     const importing=url.pathname==='/dashboard/api/import-installs';
-    if(req.method!==(importing?'POST':'GET'))return send(res,405,{error:'method_not_allowed'});
-    const files={'/dashboard/':'dashboard.html','/dashboard':'dashboard.html','/dashboard/app.js':'dashboard-app.js','/dashboard/style.css':'dashboard-style.css'};
+    if(adminRoute?!['GET','POST'].includes(req.method):req.method!==(importing?'POST':'GET'))return send(res,405,{error:'method_not_allowed'});
+    const files={'/dashboard/':'dashboard.html','/dashboard':'dashboard.html','/dashboard/app.js':'dashboard-app.js','/dashboard/style.css':'dashboard-style.css','/dashboard/admin.js':'dashboard-admin-app.js','/dashboard/admin.css':'dashboard-admin.css'};
     if(Object.hasOwn(files,url.pathname)){const name=files[url.pathname];return send(res,200,fs.readFileSync(path.join(__dirname,name)),name.endsWith('.js')?'text/javascript; charset=utf-8':name.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8');}
     if(url.pathname==='/dashboard/config')return send(res,200,{firebase:PUBLIC_FIREBASE});
-    if(url.pathname!=='/dashboard/api/summary'&&!importing)return send(res,404,{error:'not_found'});
+    if(url.pathname!=='/dashboard/api/summary'&&!importing&&!adminRoute)return send(res,404,{error:'not_found'});
     const ip=req.socket.remoteAddress;const at=Date.now();let rate=rates.get(ip);if(!rate||at-rate.at>60000)rates.set(ip,rate={at,n:0});if(rates.size>10000)rates.clear();if(++rate.n>60)return send(res,429,{error:'rate_limit'});
     const token=req.headers.authorization?.match(/^Bearer (.{1,10000})$/)?.[1];if(!token)return send(res,401,{error:'sign_in_required'});
     let user;try{user=await verifyIdToken(token);}catch{return send(res,401,{error:'invalid_session'});}
     if(user.email_verified!==true||user.firebase?.sign_in_provider!=='google.com'||user.email?.toLowerCase()!==owner.toLowerCase())return send(res,403,{error:'owner_only'});
+    if(adminRoute){
+      if(req.method==='POST'){
+        if(!req.headers['content-type']?.startsWith('application/json'))return send(res,415,{error:'json_required'});
+        if(req.headers.origin!==`https://${req.headers.host}`)return send(res,403,{error:'invalid_origin'});
+      }
+      try{return send(res,200,await playerAdmin.handle(req,url,user.email));}catch(e){return send(res,e.status||503,{error:e.status?e.message:'temporarily_unavailable'});}
+    }
     if(importing){
       if(!req.headers['content-type']?.startsWith('application/json'))return send(res,415,{error:'json_required'});
       if(req.headers.origin&&req.headers.origin!==`https://${req.headers.host}`)return send(res,403,{error:'invalid_origin'});

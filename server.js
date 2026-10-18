@@ -485,7 +485,9 @@ async function verifyAuthToken(idToken) {
 async function resolveUid({ idToken, fallbackUid }) {
   if (!admin) return fallbackUid || null; // legacy fallback
   const verified = await verifyAuthToken(idToken);
-  return verified ? verified.uid : null;
+  if(!verified)return null;
+  try{if((await db.collection('dashboard_admin_players').doc(verified.uid).get()).data()?.banned)return null;}catch{return null;}
+  return verified.uid;
 }
 
 // ══════════════════════════════════════════════════════
@@ -2593,6 +2595,7 @@ try {
     });
     db = admin.firestore();
     footballDashboard = createDashboard({db, credentials:serviceAccount,
+      onPlayerChanged: uid => {for(const socket of io.sockets.sockets.values())if(socket.uid===uid)socket.disconnect(true);},
       verifyIdToken: token => admin.auth().verifyIdToken(token, true),
       live: () => ({online:new Set([...io.sockets.sockets.values()].map(s=>s.uid).filter(Boolean)).size,
         rooms:[...rooms.values()].filter(r=>r.status==='playing').length, connections:io.engine.clientsCount})});
