@@ -18,12 +18,18 @@ function makeWorker(){
       if(!net.flushQueued){net.flushQueued=true;setImmediate(()=>{
         net.flushQueued=false;if(room.status!=='playing'||!matches.has(room.id))return;
         const emittedAt=performance.now();
-        // Opt-in timing accompanies this exact snapshot; never contains profile data.
+        const snapshot=Wire.snapshot(net.lastSnapshot);
+        // Admit the pair only while idle. A volatile timing packet makes the
+        // transport non-writable immediately, dropping a following volatile state.
+        // Once admitted, queue both in order; skip future pairs under backpressure.
         for(const socketId of Object.keys(room.players)){
           const peer=io.sockets.sockets.get(socketId);
-          if(peer?.data?.netDiagnostics)peer.volatile.emit('net:timing',{id:net.lastSnapshot.id,createdAt:net.lastSnapshot.sentAt,workerReceivedAt:net.workerReceivedAt,emittedAt,transport:peer.conn?.transport?.name||null,writable:!!peer.conn?.transport?.writable,buffered:peer.conn?.writeBuffer?.length||0});
+          if(peer?.data?.netDiagnostics){
+            if(!peer.conn?.transport?.writable||peer.conn.writeBuffer?.length)continue;
+            peer.emit('net:timing',{id:net.lastSnapshot.id,createdAt:net.lastSnapshot.sentAt,workerReceivedAt:net.workerReceivedAt,emittedAt,transport:peer.conn.transport.name,writable:true,buffered:0});
+            peer.emit('net:state',snapshot);
+          }else io.to(socketId).volatile.emit('net:state',snapshot);
         }
-        io.to(room.id).volatile.emit('net:state',Wire.snapshot(net.lastSnapshot));
         const second=Math.floor(room.game.tick/60);
         if(second!==net.lastSecond){net.lastSecond=second;room.matchTimeLeft=Math.max(0,(room.game.config.durationTicks-room.game.tick)*P.TICK_MS);
           io.to(room.id).emit('match:timer',{timeLeft:room.matchTimeLeft});}
