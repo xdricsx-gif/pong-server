@@ -12,8 +12,8 @@ test('magnet charges 20% on a fresh press and 20% per second; holding cannot res
   P.step(w,{0:command(751)});assert.ok(w.magEnergy[0]<.05);assert.equal(w.magnet[0],true);
 });
 test('insufficient energy consumes no partial activation and each repeated tap has its own cost',()=>{
-  const w=world();w.magEnergy[0]=.199;P.step(w,{0:command(1)});assert.equal(w.magnet[0],false);assert.equal(w.magEnergy[0],.199);
-  w.magEnergy[0]=1;P.step(w,{0:command(2,false)});P.step(w,{0:command(3)});P.step(w,{0:command(4,false)});P.step(w,{0:command(5)});assert.ok(w.magEnergy[0]>.59&&w.magEnergy[0]<.6);
+  const w=world();w.energy[0]=.199;P.step(w,{0:command(1)});assert.equal(w.magnet[0],false);assert.equal(w.magEnergy[0],.199);
+  w.energy[0]=1;P.step(w,{0:command(2,false)});P.step(w,{0:command(3)});P.step(w,{0:command(4,false)});P.step(w,{0:command(5)});assert.ok(w.magEnergy[0]>.59&&w.magEnergy[0]<.6);
 });
 test('attraction fades smoothly to zero, is stronger near the ship and never captures at a distance',()=>{
   const w=world();w.magnet[0]=true;
@@ -45,7 +45,7 @@ test('swept capture catches fast incoming balls before paddle bounce; missed pad
 });
 test('energy exhaustion, stale input, disconnect and elimination release held balls exactly once',()=>{
   for(const mode of ['energy','stale','disconnect','eliminate']){const w=world();w.balls=[ball(w,0,37,0,1)];P.step(w,{0:command(1)});assert.ok(w.balls[0].mag_held_0);
-    let releases=0;for(let t=2;t<=15;t++){if(mode==='energy')w.magEnergy[0]=0;
+    let releases=0;for(let t=2;t<=15;t++){if(mode==='energy')w.energy[0]=0;
       P.step(w,mode==='stale'?{}:{0:command(t)},t===2&&['disconnect','eliminate'].includes(mode)?[{type:mode==='disconnect'?'connected':'eliminate',slot:0,value:false}]:[]);
       releases+=w.events.filter(e=>e.data.type==='magnet_release').length;}
     assert.equal(releases,1,mode);assert.ok(!w.balls[0].mag_held_0);}

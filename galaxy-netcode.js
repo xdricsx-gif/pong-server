@@ -37,7 +37,7 @@ class Authority {
       if(!c||!validInt(c.seq)||c.seq===0||!validInt(c.tick)||!validInt(c.boost)||c.boost>c.seq||
         ![-1,0,1].includes(c.dx)||(c.target!=null&&(!Number.isFinite(c.target)||c.target<0||c.target>520))||
         (c.rocket!==undefined&&(!validInt(c.rocket)||c.rocket>c.seq))||(c.rocketTarget!==undefined&&![-1,0,1,2,3].includes(c.rocketTarget))||
-        ['shield','emp'].some(k=>c[k]!==undefined&&(!validInt(c[k])||c[k]>c.seq))||
+        ['shield','emp','cloak'].some(k=>c[k]!==undefined&&(!validInt(c[k])||c[k]>c.seq))||
         ['empX','empY'].some(k=>c[k]!=null&&(!Number.isFinite(c[k])||c[k]<0||c[k]>520))||
         typeof c.magnet!=='boolean'||c.tick>this.world.tick+FUTURE||c.tick<this.minTicks[slot]){this.metrics.rejected++;continue;}
       const seen=this.seen[slot];if(seen.has(c.seq)){this.metrics.duplicate++;continue;}
@@ -46,7 +46,7 @@ class Authority {
       // First valid command for a slot/tick is immutable, even across replay.
       if(list[slot]){this.metrics.rejected++;continue;}
       list[slot]={seq:c.seq,tick:c.tick,dx:c.dx,boost:c.boost,magnet:c.magnet,target:c.target??null,rocket:c.rocket||0,rocketTarget:c.rocketTarget??-1,
-        shield:c.shield||0,emp:c.emp||0,empX:c.empX??null,empY:c.empY??null};
+        cloak:c.cloak||0,shield:c.shield||0,emp:c.emp||0,empX:c.empX??null,empY:c.empY??null};
       seen.set(c.seq,c.tick);this.ack[slot]=Math.max(this.ack[slot],c.seq);this.metrics.accepted++;
       if(c.tick<=this.world.tick)this.dirty=this.dirty===null?c.tick:Math.min(this.dirty,c.tick);
     }
@@ -95,12 +95,12 @@ class Client {
     this.slot=slot;this.matchId=matchId;this.epoch=epoch;this.send=send;this.requestSync=requestSync;
     this.world=null;this.previous=null;this.base=null;this.latestId=-1;this.seq=0;this.boost=0;
     this.pending=new Map();this.input={dx:0,magnet:false,target:null};this.boostQueued=false;this.rocket=0;this.rocketTarget=-1;this.rocketQueued=false;
-    this.shield=0;this.emp=0;this.shieldQueued=false;this.empQueued=false;this.empX=null;this.empY=null;
+    this.cloak=0;this.cloakQueued=false;this.shield=0;this.emp=0;this.shieldQueued=false;this.empQueued=false;this.empX=null;this.empY=null;
     this.anchorTime=0;this.anchorTick=0;this.rtt=100;this.lastReceived=0;this.lastSent=-Infinity;
     this.clockOffset=null;this.clockSamples=[];this.hasAnchor=false;this.lastCorrection=[];
     this.remoteCommands=new Map();this.systemEvents=new Map();
     this.lastSyncRequest=-Infinity;this.resumeRequested=false;
-    this.paused=false;this.needsSync=false;this.corrections=new Map();
+    this.paused=false;this.needsSync=false;this.corrections=new Map();this.paddleCorrections=new Map();this.remotePresentation=new Map();
     this.metrics={snapshots:0,staleSnapshots:0,reconciliations:0,softCorrections:0,hardCorrections:0,
       maxCorrection:0,predictionStops:0,maxPending:0,ownPaddleCorrections:0,maxOwnPaddleCorrection:0,replayedLocalPastInputs:0};
   }
@@ -108,6 +108,7 @@ class Client {
     this.input={dx:clamp(dx,-1,1),magnet:!!magnet,target:Number.isFinite(target)?clamp(target,0,520):null};if(boost)this.boostQueued=true;
   }
   fireRocket(target){if([0,1,2,3].includes(target)){this.rocketTarget=target;this.rocketQueued=true;}}
+  cloakShip(){this.cloakQueued=true;}
   deployShield(){this.shieldQueued=true;}
   fireEMP(x,y){if(Number.isFinite(x)&&Number.isFinite(y)){this.empX=clamp(x,0,520);this.empY=clamp(y,0,520);this.empQueued=true;}}
   setRtt(ms){if(Number.isFinite(ms)&&ms>=0&&ms<3000)this.rtt=clamp(ms,0,400);}
@@ -118,14 +119,14 @@ class Client {
     const best=this.clockSamples.reduce((a,b)=>a.rtt<b.rtt?a:b);
     this.clockOffset=best.offset;this.setRtt(this.rtt*.8+rtt*.2);
   }
-  suspend(){this.paused=true;this.input={dx:0,magnet:false};this.boostQueued=false;this.rocketQueued=false;this.shieldQueued=false;this.empQueued=false;this.needsSync=true;}
+  suspend(){this.paused=true;this.input={dx:0,magnet:false};this.boostQueued=false;this.rocketQueued=false;this.shieldQueued=false;this.empQueued=false;this.cloakQueued=false;this.needsSync=true;}
   requestSynchronization(now,reset=false){
     // Every entry path shares the retry clock. A between-frame resume anchors
     // its retry on the next frame without sending another immediate request.
     this.lastSyncRequest=Number.isFinite(now)?now:null;
     this.requestSync(reset);
   }
-  resume(){this.paused=false;this.pending.clear();this.boostQueued=false;this.rocketQueued=false;this.shieldQueued=false;this.empQueued=false;this.needsSync=true;this.resumeRequested=true;this.requestSynchronization(null,true);}
+  resume(){this.paused=false;this.pending.clear();this.boostQueued=false;this.rocketQueued=false;this.shieldQueued=false;this.empQueued=false;this.cloakQueued=false;this.needsSync=true;this.resumeRequested=true;this.requestSynchronization(null,true);}
   commandsAt(tick){
     const accepted=this.remoteCommands.get(tick)||{},local=this.pending.get(tick);
     // The server's immutable accepted command wins any same-tick conflict.
@@ -137,6 +138,7 @@ class Client {
     if(packet.epochs[this.slot]!==this.epoch)return false;
     if(packet.world.tick<this.base?.tick){this.metrics.staleSnapshots++;return false;}
     if(!packet.replay||packet.replay.world.tick!==packet.committed||packet.committed>packet.world.tick||packet.world.tick-packet.committed>WINDOW)return false;
+    const displayedBefore=this.world?this.sample(now):null;
     const before=this.world?P.checkpoint(this.world):null,oldTick=before?.tick||packet.world.tick;
     const priorEstimate=this.anchorTick+(now-this.anchorTime)/DT;
     const resync=this.needsSync;
@@ -159,7 +161,8 @@ class Client {
     this.boost=Math.max(this.boost,this.base.lastBoost[this.slot]);
     this.rocket=Math.max(this.rocket,this.base.lastRocket[this.slot]);
     this.shield=Math.max(this.shield,this.base.lastShield[this.slot]);this.emp=Math.max(this.emp,this.base.lastEmp[this.slot]);
-    this.seq=Math.max(this.seq,this.boost,this.rocket,this.shield,this.emp,packet.ack[this.slot]);this.metrics.snapshots++;
+    this.cloak=Math.max(this.cloak,this.base.lastCloak[this.slot]);
+    this.seq=Math.max(this.seq,this.cloak,this.boost,this.rocket,this.shield,this.emp,packet.ack[this.slot]);this.metrics.snapshots++;
     // A recent server snapshot can precede receipt of our uplink. Keep redundant
     // commands until committed, otherwise one dropped packet can lose a button edge.
     for(const [tick] of this.pending)if(tick<=packet.committed)this.pending.delete(tick);
@@ -190,6 +193,20 @@ class Client {
         else if(d>=.05)this.metrics.hardCorrections++;
       }
     }
+    // Preserve the currently displayed remote hull across authoritative replay.
+    // This is a render-only offset: collision state and input prediction stay exact.
+    // Smooth only the correction, not normal movement, so velocity has no permanent lag.
+    this.paddleCorrections.clear();
+    if(resync)this.remotePresentation.clear();
+    if(displayedBefore&&!resync&&!this.paused){
+      const alpha=clamp(this.desiredTick(now)-this.world.tick,0,1);
+      for(const slot of P.SLOTS){
+        if(slot===this.slot||this.world.eliminated[slot]||displayedBefore.eliminated[slot])continue;
+        const raw=this.previous.paddles[slot]+(this.world.paddles[slot]-this.previous.paddles[slot])*alpha;
+        const offset=displayedBefore.paddles[slot]-raw;
+        if(Math.abs(offset)>.001&&Math.abs(offset)<80)this.paddleCorrections.set(slot,{offset,time:now});
+      }
+    }
     return true;
   }
   // A small fixed input lead keeps the predicted contact horizon short.
@@ -212,9 +229,10 @@ class Client {
       if(!c){const seq=++this.seq;if(this.boostQueued){this.boost=seq;this.boostQueued=false;}
         if(this.rocketQueued){this.rocket=seq;this.rocketQueued=false;}
         if(this.shieldQueued){this.shield=seq;this.shieldQueued=false;}
+        if(this.cloakQueued){this.cloak=seq;this.cloakQueued=false;}
         if(this.empQueued){this.emp=seq;this.empQueued=false;}
         c={tick:t,seq,dx:this.input.dx,magnet:this.input.magnet,boost:this.boost,target:this.input.target??null,rocket:this.rocket,rocketTarget:this.rocketTarget,
-          shield:this.shield,emp:this.emp,empX:this.empX,empY:this.empY};this.pending.set(t,c);}
+          cloak:this.cloak,shield:this.shield,emp:this.emp,empX:this.empX,empY:this.empY};this.pending.set(t,c);}
       this.previous=P.checkpoint(this.world);P.step(this.world,this.commandsAt(t),this.systemEvents.get(t)||[]);
     }
     this.metrics.maxPending=Math.max(this.metrics.maxPending,this.pending.size);
@@ -230,6 +248,24 @@ class Client {
     const target=this.desiredTick(now),alpha=this.needsSync||this.paused?1:clamp(target-w.tick,0,1);
     // One coherent timeline for paddles, held balls, fields and free balls.
     for(const s of P.SLOTS)w.paddles[s]=prev.paddles[s]+(w.paddles[s]-prev.paddles[s])*alpha;
+    for(const [slot,c] of this.paddleCorrections){
+      const age=Math.max(0,now-c.time),t=clamp(age/100,0,1);
+      if(t===1||w.eliminated[slot]){this.paddleCorrections.delete(slot);continue;}
+      const half=w.config.players[slot].paddleStats.w/2;
+      w.paddles[slot]=clamp(w.paddles[slot]+c.offset*(1-t)*(1-t),54+half,466-half);
+    }
+    // Bound render-only catch-up between frames as well as at packet arrival.
+    // A delayed snapshot can move the prediction horizon forward several ticks.
+    // Never apply that displacement as a single visible frame to a remote hull.
+    for(const slot of P.SLOTS){
+      if(slot===this.slot)continue;
+      const prior=this.remotePresentation.get(slot);
+      if(prior&&!w.eliminated[slot]&&now>=prior.time&&now-prior.time<250){
+        const travel=w.config.players[slot].paddleStats.spd*1.5*(now-prior.time)/DT;
+        w.paddles[slot]=prior.position+clamp(w.paddles[slot]-prior.position,-travel,travel);
+      }
+      this.remotePresentation.set(slot,{position:w.paddles[slot],time:now});
+    }
     for(const b of w.balls){const old=prev.balls.find(x=>x.id===b.id),held=P.SLOTS.find(s=>b['mag_held_'+s]);
       if(held!==undefined){const p=P.slotToPaddle(held,w.paddles[held],w,w.config);b.x=p.x+p.w/2+(b['mag_offX_'+held]||0);b.y=p.y+p.h/2+(b['mag_offY_'+held]||0);}
       else if(old&&old.contact===b.contact){b.x=old.x+(b.x-old.x)*alpha;b.y=old.y+(b.y-old.y)*alpha;}

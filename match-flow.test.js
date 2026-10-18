@@ -49,3 +49,14 @@ test('service + real worker (memory transport): accepted team pair remains adjac
 test('older protocol gets a readable update notice and cannot spend a stake',async t=>{
  const f=createFixture({memory:true});t.after(()=>f.close());const s=f.client(),old=event(s,'mm:error'),newer=event(s,'match:error');s.emit('mm:join',{idToken:'qa:a',netVersion:'gf-net2-3'});assert.match(await old,/Онови/);assert.equal((await newer).code,'update_required');assert.equal(f.rooms.size,0);assert.equal(f.data.get('users_private/a').silver,1000);
 });
+
+test('leaving ranked releases the player before opponents finish and preserves a new reservation',{timeout:16000},async t=>{
+ const f=createFixture({memory:true,rankedWaitMs:60});t.after(()=>f.close());
+ const a=await connect(f,'a');let started=event(a,'net:init');a.emit('mm:join',{mode:'ranked',idToken:'qa:a',netVersion:P.VERSION});const first=await started;
+ const old=f.rooms.get(first.matchId),released=event(a,'match:released'),result=event(a,'match:result');a.emit('leave_game');
+ const early=await result;await released;assert.equal(early.partial,true);assert.equal(early.places[0],0);assert.equal(f.data.get('users_private/a').activeMatchId,null);
+ started=event(a,'net:init');a.emit('mm:join',{mode:'ranked',idToken:'qa:a',netVersion:P.VERSION});const next=await started;
+ assert.notEqual(next.matchId,first.matchId);assert.equal(f.data.get('users_private/a').silver,800);
+ for(const slot of [3,2])old.net2.authority.system({type:'eliminate',slot,reason:'leave'});
+ await delay(600);assert.equal(f.data.get('users_private/a').activeMatchId,next.matchId);assert.equal(f.data.get('users_private/a').silver,800);assert.equal(f.data.get('users_public/a').gamesPlayed,1);
+});

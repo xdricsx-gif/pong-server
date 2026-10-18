@@ -674,7 +674,7 @@ function getFFRadius(f) {
 }
 
 // ── FORCE FIELD REPULSOR (continuous field) ──
-//
+// 
 // Поведінка: поле працює як гравітаційний репульсор. Щотіку м'яч, що знаходиться
 // в радіусі, отримує імпульс по нормалі (від центра поля назовні). Чим ГЛИБШЕ
 // м'яч у полі — тим СИЛЬНІШИЙ push. Додатково, при першому входженні в поле
@@ -2055,6 +2055,11 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('tutorial:progress', async (value, ack) => {
+    try { const result=await require('./flight-school').saveFlightSchool(db,socket.uid,value); if(typeof ack==='function')ack({ok:true,...result}); }
+    catch(e){if(typeof ack==='function')ack({ok:false,error:e.message});}
+  });
+
   // ── Обмін золото → срібло ──
   socket.on('shop:exchange', async ({ rateId }) => {
     if (!db) return socket.emit('shop:error', { operation:'exchange', msg: 'server_unavailable' });
@@ -2382,7 +2387,7 @@ io.on('connection', (socket) => {
       const diff = Math.abs(clampedPos - serverPos);
 
       // Server-follows-client: беремо клієнтську позицію (prediction вже валідована клампами + швидкістю).
-      // АЛЕ: коли магніт активний, обмежуємо максимальний delta за тік щоб м'яч не "стрибав"
+      // АЛЕ: коли магніт активний, обмежуємо максимальний delta за тік щоб м'яч не "стрибав" 
       // через network batching (коли кілька пакетів прийшли разом після паузи).
       if (gs.magnet && gs.magnet[slot] && diff > 8) {
         // Обмежуємо рух paddle до 3×швидкості за тік — достатньо швидко щоб догнати,

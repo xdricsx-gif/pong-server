@@ -28,6 +28,7 @@ function makeWorker(){
         version:P.VERSION,matchId:room.id,slot:message.slot,epoch:message.epoch,snapshot:message.packet});
     }else if(message.type==='commit'){
       for(const event of message.events){
+        if(event.type==='eliminated')room.onEliminated?.(message.world,event.data);
         if(event.type==='finish'){
           room.game=message.world;endGame(room,message.world.winner);matches.delete(room.id);worker.matchIds.delete(room.id);return;
         }

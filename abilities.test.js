@@ -46,14 +46,14 @@ test('directional EMP hits two enemies but neither caster nor ship outside its s
  const w=world();P.step(w,{0:cmd(1,{emp:1,empX:520,empY:0})});stepTo(w,150);
  assert.ok(w.empUntil[1]>0);assert.ok(w.empUntil[3]>0);assert.equal(w.empUntil[0],0);assert.equal(w.empUntil[2],0);assert.equal(w.energy[1],0);assert.equal(w.magEnergy[3],0);assert.equal(w.empReadyAt[0],1801);
 });
-test('EMP preserves movement, drains both gauges and prevents all five abilities for precisely ten seconds',()=>{
+test('EMP preserves movement, drains shared energy and prevents abilities for precisely ten seconds',()=>{
  const w=world();P.step(w,{0:cmd(1,{emp:1,empX:260,empY:0})});while(!w.empUntil[1])P.step(w);
  const until=w.empUntil[1],at=w.tick,x=w.paddles[1];assert.equal(until-at,600);
  for(let t=at+1;t<until;t++){P.step(w,{1:cmd(t,{dx:1,magnet:true,boost:t,rocket:t,rocketTarget:0,shield:t,emp:t,empX:260,empY:520})});
   assert.equal(w.energy[1],0);assert.equal(w.magEnergy[1],0);assert.equal(w.fields[1].active,false);assert.equal(w.magnet[1],false);assert.equal(w.missiles.some(m=>m.owner===1),false);assert.equal(w.goalShields[1],null);assert.equal(w.empWaves.some(e=>e.owner===1),false);
  }
  assert.ok(w.paddles[1]>x);P.step(w,{1:cmd(until)});assert.ok(w.energy[1]>0);assert.ok(w.magEnergy[1]>0);assert.equal(P.abilitiesLocked(w,1),false);
- P.step(w,{1:cmd(until+1,{shield:until+1})});assert.ok(w.goalShields[1]);
+ P.step(w,{1:cmd(until+1,{shield:until+1})});assert.equal(w.goalShields[1],null); // EMP expires empty: recharge is required before buying a shield.
 });
 test('existing autonomous shield survives EMP and a captured ball is released without a boost',()=>{
  const w=world();P.step(w,{1:cmd(1,{shield:1})});stepTo(w,70);const original=P.clone(w.goalShields[1]);

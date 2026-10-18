@@ -68,7 +68,7 @@ function createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer
   async function createMatch(mode,uids,groups=[]){
     for(const uid of uids)if(!socketFor(uid)||inMatch.has(uid))fail('busy');
     for(const g of groups){clearTimeout(g.timer);queues[mode]=queues[mode].filter(x=>x!==g);for(const uid of g.uids)queued.delete(uid);}
-    const room=createRoom('m_'+randomUUID());room.managed=true;room.mode=mode;room.protocol=2;room.roster={};room.lease={};room.status='reserving';
+    const room=createRoom('m_'+randomUUID());room.managed=true;room.mode=mode;room.protocol=2;room.roster={};room.lease={};room.status='reserving';room.onEliminated=(world,event)=>serial(null,()=>depart(room,world,event));
     for(let slot=0;slot<uids.length;slot++){const uid=uids[slot];room.roster[slot]={...profiles.get(uid),slot};cancelInvites(uid);}
     for(const uid of uids)inMatch.set(uid,room);rooms.set(room.id,room);
     try{
@@ -99,8 +99,8 @@ function createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer
     try{await store().recordOutcome(room.id,room.result);const result=await store().settle(room.id);
       room.status='finished';room.result=result;
       if(!room.analyticsRecorded){room.analyticsRecorded=true;try{onSettled(room,result);}catch(e){console.error('[match analytics]',e.message);}}
-      for(const p of Object.values(room.roster))inMatch.delete(p.uid);
-      await Promise.all(Object.values(room.roster).map(p=>sendResult(p.uid,result)));
+      for(const p of Object.values(room.roster))if(inMatch.get(p.uid)===room)inMatch.delete(p.uid);
+      await Promise.all(Object.values(room.roster).filter(p=>(!room.departed?.has(p.uid)||room.mode==='team')&&!inMatch.has(p.uid)).map(p=>sendResult(p.uid,result)));
       const timer=setTimeout(()=>rooms.delete(room.id),30000);timer.unref?.();
     }catch(e){
       io.to(room.id).emit('match:settling',{roomId:room.id,retrying:true});
@@ -112,6 +112,27 @@ function createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer
     for(const l of Object.values(room.lease))clearTimeout(l.timer);
     const world=P.create({mode:room.mode});world.winner=null;world.gameOver=true;world.endReason='abandoned';
     room.result=publicResult(room,world,reason);await persist(room);
+  }
+  async function depart(room,world,event){
+    const p=room.roster[event.slot];if(!p||room.departed?.has(p.uid))return;
+    // Only committed elimination may release a profile; speculative rollback cannot.
+    if(!world.eliminated[p.slot]||world.gameOver||world.config.activeSlots.every(s=>!world.connected[s]))return;
+    try{
+      if(room.mode==='team')await store().release(p.uid,room.id);
+      else {
+        const rule=Rules.get(room.mode),place=rule.slots.length-1-world.eliminationOrder.indexOf(p.slot);
+        if(place<0||place>=rule.slots.length)throw Error('invalid_place');
+        const result={...publicResult(room,world),partial:true,places:[p.slot],draw:false,aborted:false,reason:event.reason||'eliminated',
+          rewards:{[p.slot]:{place,draw:false,stake:rule.stake,silver:rule.payouts[place],xp:rule.xp[place],ratingDelta:rule.rating[place]}},
+          participants:[{uid:p.uid,slot:p.slot}]};
+        const paid=await store().settle(room.id,p.uid,result);
+        if(inMatch.get(p.uid)===room)await sendResult(p.uid,paid);
+      }
+      if(!room.departed)room.departed=new Set();room.departed.add(p.uid);
+      if(inMatch.get(p.uid)===room)inMatch.delete(p.uid);
+      const s=socketFor(p.uid);if(s){s.leave(room.id);clearPlayer(room,s.id);
+        s.emit('match:released',{roomId:room.id,teamPending:room.mode==='team'});}
+    }catch(e){const timer=setTimeout(()=>{if(!closed)serial(null,()=>depart(room,world,event));},1000);timer.unref?.();}
   }
   function expire(room,slot){const l=room.lease[slot];if(!l||l.expired||room.status!=='playing')return;
     l.expired=true; // Claim timeout synchronously before queueing a worker event.

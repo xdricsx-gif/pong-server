@@ -39,15 +39,19 @@ function createLedger({db,owner,now=Date.now}){
     if(d.state==='settled'||d.state==='settling')return d;
     tx.update(ref,{state:'settling',result,leaseUntil:now()});return {...d,state:'settling',result};
   });}
-  async function settle(id){available();return db.runTransaction(async tx=>{
+  async function settle(id,onlyUid=null,earlyResult=null){available();return db.runTransaction(async tx=>{
     const ref=session(id),snap=await tx.get(ref);if(!snap.exists)throw fail('match_not_found');const d=snap.data();
     if(d.state==='settled')return d.result;
-    if(d.state!=='settling'||!d.result)throw fail('result_pending');
+    if(onlyUid&&d.partialResults?.[onlyUid])return d.partialResults[onlyUid];
+    if(!onlyUid&&(d.state!=='settling'||!d.result))throw fail('result_pending');
+    if(onlyUid&&(!earlyResult||!d.roster.some(p=>p.uid===onlyUid)))throw fail('invalid_reward');
     const wallets=[],profiles=[];
     for(const p of d.roster){wallets.push(await tx.get(priv(p.uid)));profiles.push(await tx.get(pub(p.uid)));}
-    const result={...d.result,serverCommitted:true},totals={};
+    const result={...(onlyUid?earlyResult:d.result),serverCommitted:true},totals={};
     for(let i=0;i<d.roster.length;i++){
       const p=d.roster[i],w=wallets[i].data(),u=profiles[i].data();
+      if(onlyUid&&p.uid!==onlyUid)continue;
+      if(d.partialResults?.[p.uid]){result.rewards[p.slot]=d.partialResults[p.uid].rewards[p.slot];continue;}
       if(!w||!u)throw fail('account_missing');const r=result.rewards[p.slot];
       if(!r||!Number.isSafeInteger(r.silver)||r.silver<0)throw fail('invalid_reward');
       const wallet={silver:number(w.silver)+r.silver,xp:number(w.xp)+r.xp};
@@ -75,7 +79,12 @@ function createLedger({db,owner,now=Date.now}){
         opponents:Object.keys(result.players||{}).length?Object.entries(result.players).filter(([slot])=>Number(slot)!==p.slot).map(([,player])=>player.nick):d.roster.filter(x=>x.uid!==p.uid).map(x=>x.nick)});
     }
     // Totals are stored privately and filtered by the service before sending.
-    result.totals=totals;tx.update(ref,{state:'settled',result,settledAt:now(),leaseUntil:Number.MAX_SAFE_INTEGER});return result;
+    result.totals=totals;
+    if(onlyUid)tx.update(ref,{partialResults:{...d.partialResults,[onlyUid]:result}});
+    else tx.update(ref,{state:'settled',result,settledAt:now(),leaseUntil:Number.MAX_SAFE_INTEGER});return result;
+  });}
+  async function release(uid,id){return db.runTransaction(async tx=>{
+    const r=priv(uid),w=await tx.get(r);if(w.data()?.activeMatchId===id)tx.update(r,{activeMatchId:null});
   });}
   async function recover(uid,id){available();const w=await priv(uid).get();id=id||w.data()?.activeMatchId||w.data()?.lastMatchId;
     if(typeof id!=='string'||!/^m_[a-zA-Z0-9_-]+$/.test(id))return null;
@@ -85,7 +94,7 @@ function createLedger({db,owner,now=Date.now}){
       for(const p of d.roster)result.rewards[p.slot]={place:null,draw:true,stake:d.stake,silver:d.stake,xp:0,ratingDelta:0};
       d=await recordOutcome(id,result);
     }
-    if(d.state==='settling')return settle(id);return d.state==='settled'?d.result:null;
+    if(d.state==='settling')return settle(id);return d.state==='settled'?d.result:d.partialResults?.[uid]||null;
   }
   async function renew(ids){available();for(const id of ids)await db.runTransaction(async tx=>{const ref=session(id),s=await tx.get(ref);if(s.exists&&s.data().state==='playing'&&s.data().owner===owner)tx.update(ref,{leaseUntil:now()+60000});});}
   async function wallet(uid){const [w,u]=await Promise.all([priv(uid).get(),pub(uid).get()]);const a=w.data()||{},b=u.data()||{};
@@ -97,6 +106,6 @@ function createLedger({db,owner,now=Date.now}){
   async function sweep(){available();const expired=await db.collection('match_sessions').where('leaseUntil','<',now()).limit(25).get();
     for(const s of expired.docs){const d=s.data();if(d.roster?.length)await recover(d.roster[0].uid,s.id);}
   }
-  return {reserve,recordOutcome,settle,recover,renew,sweep,wallet,pending};
+  return {reserve,recordOutcome,settle,release,recover,renew,sweep,wallet,pending};
 }
 module.exports={createLedger};
