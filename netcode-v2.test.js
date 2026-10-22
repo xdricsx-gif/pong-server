@@ -171,3 +171,30 @@ test('550ms downstream stall keeps simulation and input moving, then reconciles'
  const before=c.world.tick;c.receive(a.snapshot(),550);assert.ok(c.world.tick>=before);
  c.advance(1400);assert.equal(c.needsSync,true,'long outages still stop');
 });
+
+test('post-gap ball presentation catches up without changing physics or smoothing a bounce',()=>{
+ const w=world();w.balls=[{id:99,x:220,y:250,vx:2,vy:0,contact:0}];
+ const a=authority(w),c=new Client({slot:0,matchId:'test',epoch:0});c.setRtt(0);c.receive(a.snapshot(),0);
+ c.sample(100);c.waitReason='prediction-limit';c.receive(a.snapshot(),100);
+ c.world.balls[0].x=240;c.previous.balls[0].x=240;
+ const hash=P.hash(c.world),shown=c.sample(116).balls[0];
+ assert.ok(shown.x<224,'catch-up displacement is bounded on first recovered frame');
+ assert.equal(P.hash(c.world),hash,'render smoothing never changes collision state');
+ c.world.balls[0].contact++;c.previous.balls[0].contact++;
+ assert.equal(c.sample(132).balls[0].x,240,'new bounce invalidates smoothing');
+ c.world.balls=[];c.previous.balls=[];c.sample(150);
+ assert.equal(c.ballPresentation.size,0,'removed balls leave no presentation history');
+});
+
+test('650ms delivery pause resumes with bounded ball travel and converges to authority',()=>{
+ const w=world();w.balls=[{id:99,x:180,y:250,vx:.8,vy:0,contact:0}];
+ const a=authority(w),c=new Client({slot:0,matchId:'test',epoch:0});c.setRtt(0);c.receive(a.snapshot(),0);
+ let shown;
+ for(let t=1;t<=39;t++){a.advance();c.advance(t*P.TICK_MS);shown=c.sample(t*P.TICK_MS).balls[0].x;}
+ assert.equal(c.waitReason,'prediction-limit');
+ c.receive(a.snapshot(),650);
+ assert.equal(c.sample(650).balls[0].x,shown,'packet reception cannot teleport the displayed ball');
+ assert.equal(c.world.tick,a.world.tick);assert.equal(c.world.balls[0].x,a.world.balls[0].x,'authoritative ball already caught up');
+ for(let t=40;t<=54;t++){a.advance();c.receive(a.snapshot(),t*P.TICK_MS);c.advance(t*P.TICK_MS);c.sample(t*P.TICK_MS);}
+ assert.ok(Number.isFinite(c.sample(920).balls[0].x));assert.equal(c.needsSync,false);
+});

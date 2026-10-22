@@ -1,10 +1,10 @@
 (function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory();else root.GalaxyMatchRules=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 const MODES=Object.freeze({
-  ranked:Object.freeze({id:'ranked',title:'Кожен сам за себе',slots:[0,1,2,3],stake:100,payouts:[250,150,0,0],rating:[50,20,5,-20],xp:[100,50,20,0],durationTicks:10800,lives:10}),
+  ranked:Object.freeze({id:'ranked',title:'Кожен сам за себе',slots:[0,1,2,3],stake:100,payouts:[250,150,0,0],rating:[50,20,5,-20],xp:[100,50,20,0],durationTicks:10800,lives:15}),
   team:Object.freeze({id:'team',title:'Командний 2×2',slots:[0,1,2,3],teams:[0,1,1,0],stake:100,payouts:[200,0],rating:[25,-25],xp:[100,0],durationTicks:10800,lives:20}),
-  duel:Object.freeze({id:'duel',title:'Дружній 1×1',slots:[0,1],stake:0,payouts:[0,0],rating:[0,0],xp:[0,0],durationTicks:10800,lives:10}),
-  training:Object.freeze({id:'training',title:'Тренування',slots:[0,1,2,3],stake:0,payouts:[1500,700,200,0],rating:[0,0,0,0],xp:[150,75,30,0],energy:20,durationTicks:10800,lives:10})
+  duel:Object.freeze({id:'duel',title:'Дружній 1×1',slots:[0,1],stake:0,payouts:[0,0],rating:[0,0],xp:[0,0],durationTicks:10800,lives:15}),
+  training:Object.freeze({id:'training',title:'Тренування',slots:[0,1,2,3],stake:0,payouts:[1500,700,200,0],rating:[0,0,0,0],xp:[150,75,30,0],energy:20,durationTicks:10800,lives:15})
 });
 function get(mode){if(!Object.prototype.hasOwnProperty.call(MODES,mode))throw Error('invalid_mode');return MODES[mode];}
 function places(world){const slots=world.config.activeSlots||[0,1,2,3];

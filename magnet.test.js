@@ -24,7 +24,10 @@ test('attraction fades smoothly to zero, is stronger near the ship and never cap
 test('short tap only bends trajectory: no capture, release impulse or teleport',()=>{
   for(const s of P.SLOTS){const w=world();w.balls=[ball(w,s,60,10,0)];P.step(w,{[s]:command(1)});const before={...w.balls[0]};
     assert.ok(!before['mag_held_'+s]);assert.ok(Math.hypot(before.vx,before.vy)>0);
-    P.step(w,{[s]:command(2,false)});const b=w.balls[0];assert.ok(Math.abs(b.vx-before.vx)<1e-6&&Math.abs(b.vy-before.vy)<1e-6);
+    P.step(w,{[s]:command(2,false)});const b=w.balls[0];
+    const initial=Math.hypot(before.vx,before.vy),after=Math.hypot(b.vx,b.vy);
+    assert.ok(after-initial<=2.5/24+.000002,'release gets only ordinary gradual speed recovery, not a magnet launch');
+    assert.ok(Math.abs(b.vx*before.vy-b.vy*before.vx)<.000002,'recovery preserves the bent heading');
     assert.ok(Math.abs(b.x-before.x-before.vx)<1e-6&&Math.abs(b.y-before.y-before.vy)<1e-6);assert.ok(!w.events.some(e=>e.data.type==='magnet_release'));
   }
 });

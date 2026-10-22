@@ -101,7 +101,7 @@ class Client {
     this.remoteCommands=new Map();this.systemEvents=new Map();
     this.waitReason=null;this.lastAdvanceAt=null;
     this.lastSyncRequest=-Infinity;this.resumeRequested=false;
-    this.paused=false;this.needsSync=false;this.corrections=new Map();this.paddleCorrections=new Map();this.remotePresentation=new Map();
+    this.paused=false;this.needsSync=false;this.corrections=new Map();this.paddleCorrections=new Map();this.remotePresentation=new Map();this.ballPresentation=new Map();this.recoveryUntil=0;
     this.metrics={snapshots:0,staleSnapshots:0,reconciliations:0,softCorrections:0,hardCorrections:0,
       maxCorrection:0,predictionStops:0,predictionCapFrames:0,predictionCapMs:0,waitingSnapshotMs:0,maxPending:0,ownPaddleCorrections:0,maxOwnPaddleCorrection:0,replayedLocalPastInputs:0};
   }
@@ -139,6 +139,7 @@ class Client {
     if(packet.epochs[this.slot]!==this.epoch)return false;
     if(packet.world.tick<this.base?.tick){this.metrics.staleSnapshots++;return false;}
     if(!packet.replay||packet.replay.world.tick!==packet.committed||packet.committed>packet.world.tick||packet.world.tick-packet.committed>WINDOW)return false;
+    if(this.waitReason==='prediction-limit')this.recoveryUntil=now+200;
     const displayedBefore=this.world?this.sample(now):null;
     const before=this.world?P.checkpoint(this.world):null,oldTick=before?.tick||packet.world.tick;
     const priorEstimate=this.anchorTick+(now-this.anchorTime)/DT;
@@ -200,7 +201,7 @@ class Client {
     // This is a render-only offset: collision state and input prediction stay exact.
     // Smooth only the correction, not normal movement, so velocity has no permanent lag.
     this.paddleCorrections.clear();
-    if(resetPresentation)this.remotePresentation.clear();
+    if(resetPresentation){this.remotePresentation.clear();this.ballPresentation.clear();}
     if(displayedBefore&&!resetPresentation){
       const alpha=clamp(this.desiredTick(now)-this.world.tick,0,1);
       for(const slot of P.SLOTS){
@@ -280,6 +281,21 @@ class Client {
       const correction=this.corrections.get(b.id);if(correction){const k=clamp(1-(now-correction.time)/80,0,1);
         if(k&&held===undefined&&correction.contact===b.contact&&b.x>130&&b.x<390&&b.y>130&&b.y<390){b.x+=correction.dx*k;b.y+=correction.dy*k;}else this.corrections.delete(b.id);}
     }
+    // Rate-limit render-only catch-up after a delayed batch, never physics.
+    // Contacts, held balls and goal areas snap to authority instead of smoothing
+    // across collisions. Normal-speed movement remains unchanged.
+    const liveIds=new Set();
+    for(const b of w.balls){
+      liveIds.add(b.id);const prior=this.ballPresentation.get(b.id);
+      const held=P.SLOTS.some(s=>b['mag_held_'+s]);
+      if(now<this.recoveryUntil&&prior&&!held&&prior.contact===b.contact&&now>=prior.time&&now-prior.time<100&&b.x>130&&b.x<390&&b.y>130&&b.y<390&&prior.x>130&&prior.x<390&&prior.y>130&&prior.y<390){
+        const dx=b.x-prior.x,dy=b.y-prior.y,d=Math.hypot(dx,dy);
+        const travel=Math.max(.5,Math.hypot(b.vx,b.vy))*1.5*(now-prior.time)/DT;
+        if(d>travel&&d<80){b.x=prior.x+dx*travel/d;b.y=prior.y+dy*travel/d;}
+      }
+      this.ballPresentation.set(b.id,{x:b.x,y:b.y,contact:b.contact,time:now});
+    }
+    for(const id of this.ballPresentation.keys())if(!liveIds.has(id))this.ballPresentation.delete(id);
     for(const m of w.missiles||[]){const old=prev.missiles?.find(x=>x.id===m.id);
       if(old&&m.age>0&&old.age>0){m.x=old.x+(m.x-old.x)*alpha;m.y=old.y+(m.y-old.y)*alpha;
         m.angle=old.angle+Math.atan2(Math.sin(m.angle-old.angle),Math.cos(m.angle-old.angle))*alpha;}

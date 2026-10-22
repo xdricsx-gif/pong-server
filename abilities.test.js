@@ -43,7 +43,7 @@ test('shield activation needs deployment, is one-shot, and reloads after exactly
  P.step(w,{0:cmd(1801,{shield:1801})});assert.equal(w.goalShields[0].startTick,1801);
 });
 test('directional EMP hits two enemies but neither caster nor ship outside its sector',()=>{
- const w=world();P.step(w,{0:cmd(1,{emp:1,empX:520,empY:0})});stepTo(w,150);
+ const w=world();w.paddles[1]=430;w.paddles[3]=90;P.step(w,{0:cmd(1,{emp:1,empX:520,empY:0})});stepTo(w,150);
  assert.ok(w.empUntil[1]>0);assert.ok(w.empUntil[3]>0);assert.equal(w.empUntil[0],0);assert.equal(w.empUntil[2],0);assert.equal(w.energy[1],0);assert.equal(w.magEnergy[3],0);assert.equal(w.empReadyAt[0],1801);
 });
 test('EMP preserves movement, drains shared energy and prevents abilities for precisely ten seconds',()=>{
@@ -62,7 +62,7 @@ test('existing autonomous shield survives EMP and a captured ball is released wi
  assert.deepEqual(w.goalShields[1],original);assert.equal(P.shieldActive(w,1),true);assert.equal(w.magnet[1],false);assert.equal(w.balls[0].mag_held_1,undefined);assert.ok(Math.hypot(w.balls[0].vx,w.balls[0].vy)<=2.5);
 });
 test('EMP excludes teammates and inactive duel seats, and cannot be emitted outward or at zero distance',()=>{
- for(const mode of ['team','duel']){const w=world(mode);P.step(w,{0:cmd(1,{emp:1,empX:520,empY:0})});stepTo(w,160);assert.ok(w.empUntil[1]>0);assert.equal(w.empUntil[3],0);assert.equal(w.empUntil[2],0);}
+ for(const mode of ['team','duel']){const w=world(mode);w.paddles[1]=430;w.paddles[3]=90;P.step(w,{0:cmd(1,{emp:1,empX:520,empY:0})});stepTo(w,160);assert.ok(w.empUntil[1]>0);assert.equal(w.empUntil[3],0);assert.equal(w.empUntil[2],0);}
  const w=world();P.step(w,{0:cmd(1,{emp:1,empX:260,empY:520})});assert.equal(w.empWaves.length,0);assert.equal(w.empReadyAt[0],0);
 });
 test('disconnected or eliminated owners cannot create effects; elimination removes an active shield',()=>{
