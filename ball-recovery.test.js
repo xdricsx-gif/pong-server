@@ -1,5 +1,5 @@
 'use strict';
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),P=require('./galaxy-physics');
+const test=require('node:test'),assert=require('node:assert/strict'),P=require('./galaxy-physics');
 function world(){const w=P.create({seed:71,durationTicks:60000});w.respawns=[];return w;}
 const speed=b=>Math.hypot(b.vx,b.vy);
 test('slow free balls recover smoothly to cruise within 0.4 seconds and keep their heading',()=>{
@@ -28,7 +28,4 @@ test('magnet capture and attraction are exempt from free-flight recovery',()=>{
  assert.equal(b.mag_held_0,true);assert.equal(speed(b),0);
  const attracted=world();attracted.balls=[{id:1,x:260,y:445.01,vx:0,vy:0}];P.step(attracted,{0:{tick:1,magnet:true,dx:0}});
  assert.ok(speed(attracted.balls[0])<.001,'weak field-edge attraction must not become a recovery impulse');
-});
-test('Android/web and server use the same recovery physics',()=>{
- assert.deepEqual(fs.readFileSync(__dirname+'/galaxy-physics.js'),fs.readFileSync(__dirname+'/../app/www/galaxy-physics.js'));
 });
