@@ -11,6 +11,8 @@ const { Pool } = require('pg');
 const { createBillingService, createPublisher, registerBillingHandlers } = require('./play-billing');
 let playBilling = null;
 const { createDashboard } = require('./football-dashboard');
+const { createPromoHandler } = require('./football-promo');
+const handlePromo = createPromoHandler();
 let footballDashboard = null;
 
 const httpServer = createServer();
@@ -528,6 +530,7 @@ function getPublicConfig() {
 }
 
 httpServer.on('request', (req, res) => {
+  if (handlePromo(req, res)) return;
   if (req.url === '/dashboard' || req.url.startsWith('/dashboard/')) {
     if (!footballDashboard) { res.writeHead(503, {'Content-Type':'text/plain','Cache-Control':'no-store'}); res.end('Dashboard unavailable'); return; }
     footballDashboard.handle(req, res).catch(() => { if (!res.headersSent) res.writeHead(503); res.end(); });
