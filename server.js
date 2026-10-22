@@ -231,7 +231,7 @@ const TICK_MS = 1000 / TICK_RATE;
 
 const W = 520, H = 520, BR = 8, SMAX = 4.875, C = 130;
 const PL = 54, PLV = 54, PTH = 16, PTV = 16;
-const ML = 10, EPU = 1 / 3, ECR = 1 / 10000;
+const ML = 15, EPU = 1 / 3, ECR = 1 / 10000;
 const FDR = 380, BMULT = 2.32, FR = 54, RD = 2000;
 const PS = 3.375;
 
@@ -1992,7 +1992,7 @@ function startGame(room) {
       // Час вийшов — визначаємо переможця
       try { if (room.game && !room.game.gameOver) {
         const gs = room.game;
-        const ML_SRV = 10;
+        const ML_SRV = 15;
         const active = SLOTS.filter(s => !gs.eliminated?.[s]);
         if (active.length > 0) {
           // Хто менше пропустив — переможець

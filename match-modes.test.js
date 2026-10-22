@@ -6,7 +6,7 @@ function goal(w,s){const positions=[[260,514,0,4],[260,6,0,-4],[6,260,-4,0],[514
 test('1v1 has two players; unused walls reflect normally without charging a goal or boosting',()=>{
  const w=world('duel');assert.deepEqual(w.config.activeSlots,[0,1]);assert.deepEqual(w.eliminated,[false,false,true,true]);
  goal(w,2);assert.deepEqual(w.scores,[0,0,0,0]);assert.equal(w.balls[0].vx,4);assert.equal(w.gameOver,false);
- for(let i=0;i<10;i++)goal(w,0);assert.equal(w.winner,1);assert.equal(w.gameOver,true);assert.deepEqual(Rules.places(w),[1,0]);
+ for(let i=0;i<15;i++)goal(w,0);assert.equal(w.winner,1);assert.equal(w.gameOver,true);assert.deepEqual(Rules.places(w),[1,0]);
 });
 test('adjacent teammates share all 20 conceded goals and lose together',()=>{
  const w=world('team');assert.deepEqual(w.config.teams,[0,1,1,0]);for(let i=0;i<9;i++){goal(w,0);goal(w,3);}

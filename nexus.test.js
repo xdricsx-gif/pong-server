@@ -51,7 +51,7 @@ test('only living enemies can be targeted; team ally and inactive duel slots are
   for(const [mode,bad]of [['ranked',[0,-1,4]],['team',[0,3]],['duel',[0,2,3]]])for(const target of bad){const w=world(mode);P.step(w,{0:input(1,1,target)});assert.equal(w.missiles.length,0);assert.equal(w.rocketReadyAt[0],0);}
   const w=world();w.eliminated[1]=true;P.step(w,{0:input(1,1,1)});assert.equal(w.missiles.length,0);
 });
-test('bay follows moving launcher, launches once, hits through fields and stuns without goal damage',()=>{
+test('bay follows moving launcher, launches once, and hits after an early field expires without goal damage',()=>{
   const w=world();const before=w.lives.slice();let launched=0,hit=null;
   for(let t=1;t<800;t++){
     P.step(w,{0:{...input(t,1,1),dx:t<45?1:0},1:{...input(t),boost:t,magnet:true}});

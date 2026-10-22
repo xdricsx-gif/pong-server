@@ -6,12 +6,24 @@
 else root.GalaxyPhysics=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 
-const VERSION='gf-net2-11';
+const VERSION='gf-net2-13';
 // Rollback switch: new matches may opt out with cornerLaunches:false.
 const CORNER_LAUNCHES=false;
 function launchOrigin(vx,vy){const speed=Math.hypot(vx,vy)||1;return {x:(vx<0?520:0)+vx/speed*64,y:(vy<0?520:0)+vy/speed*64};}
 const TICK_RATE=60,TICK_MS=1000/60,W=520,H=520,BR=8,SMAX=4.875,C=54;
-const PL=54,PLV=54,PTH=16,PTV=16,ML=10,EPU=1/3,ECR=1/10000,FDR=380,FR=54,PS=3.75;
+// The normal launch range is 2.5–3; restore its floor without changing launches.
+const BALL_CRUISE_SPEED=2.5,BALL_RECOVERY_STEP=BALL_CRUISE_SPEED/(TICK_RATE*.4);
+function recoverBallSpeed(b){
+  const speed=Math.hypot(b.vx,b.vy);if(speed>=BALL_CRUISE_SPEED)return;
+  const next=Math.min(BALL_CRUISE_SPEED,speed+BALL_RECOVERY_STEP);
+  if(speed>1e-9){b.vx*=next/speed;b.vy*=next/speed;return;}
+  // A perfectly cancelling moving-hull collision can leave no heading.
+  // Restart toward open space deterministically, without a random draw.
+  const dx=W/2-b.x,dy=H/2-b.y,distance=Math.hypot(dx,dy);
+  const angle=((b.id||0)%4+.5)*Math.PI/2;
+  b.vx=next*(distance>1e-9?dx/distance:Math.cos(angle));b.vy=next*(distance>1e-9?dy/distance:Math.sin(angle));
+}
+const PL=54,PLV=54,PTH=16,PTV=16,ML=15,EPU=1/3,ECR=1/10000,FDR=380,FR=54,PS=3.75;
 const SLOTS=[0,1,2,3],SLOT_VIEW=['bottom','top','left','right'];
 const ELIM_WALL_BOOST=1.30,ELIM_WALL_RANDOM_DEG=25,ELIM_WALL_MIN_SP=3.5,ELIM_WALL_MAX_SP=6.5;
 const MAG_R=75,MAG_PULL_FORCE=1.15,MAG_CAPTURE_RADIUS=3,MAG_RELEASE_PUSH=SMAX;
@@ -373,6 +385,21 @@ function stepRockets(gs){
     m.angle+=clamp(turn,-.14,.14);const speed=3.5+Math.min(2.5,m.age/30),dx=Math.cos(m.angle)*speed,dy=Math.sin(m.angle)*speed;
     const move=gs.paddles[m.target]-gs.paddlesPrev[m.target],mx=m.target<2?move:0,my=m.target<2?0:move;
     const hit=circleSweep(m.x-(cx-mx),m.y-(cy-my),dx-mx,dy-my,target.radius+4);
+    // A travelling rocket meets the first enemy pulse before a hull. Sweep the
+    // whole tick, including paddle movement, so fast shots cannot tunnel through.
+    let interception=null;
+    for(const s of SLOTS){
+      const f=gs.fields[s];if(!enemyTarget(gs,m.owner,s)||!f.active)continue;
+      const p=slotToPaddle(s,gs.paddles[s],gs,gs.config),move=gs.paddles[s]-gs.paddlesPrev[s];
+      const fx=s<2?move:0,fy=s<2?0:move,r=getFFRadius(f)+4;
+      const t=circleSweep(m.x-(p.x+p.w/2-fx),m.y-(p.y+p.h/2-fy),dx-fx,dy-fy,r);
+      if(t!==null&&(hit===null||t<=hit)&&(interception===null||t<interception.t))interception={slot:s,t};
+    }
+    if(interception){
+      emit(gs,'rocket:intercepted',{slot:interception.slot,owner:m.owner,target:m.target,id:m.id,
+        x:round(m.x+dx*interception.t),y:round(m.y+dy*interception.t),tick:gs.tick});
+      gs.missiles.splice(i,1);continue;
+    }
     m.x=round(m.x+dx);m.y=round(m.y+dy);m.angle=round(m.angle);m.age++;
     if(hit!==null){
       gs.stunUntil[m.target]=Math.max(gs.stunUntil[m.target],gs.tick+ROCKET_STUN);
@@ -385,7 +412,7 @@ function stepRockets(gs){
 // Every ability is tick-driven and entirely checkpointed. Visuals never own timers.
 const SHIELD_DURATION=10*TICK_RATE,SHIELD_DEPLOY=60,ABILITY_RELOAD=30*TICK_RATE;
 const SHIELD_BOUNCE_GAIN=1.30,SHIELD_MIN_SPEED=SMAX,SHIELD_MAX_SPEED=6.5,SHIELD_MIN_NORMAL=.5;
-const EMP_LOCK=10*TICK_RATE,EMP_CHARGE=30,EMP_SPEED=7,EMP_RANGE=780,EMP_HALF_ANGLE=Math.PI/6;
+const EMP_LOCK=10*TICK_RATE,EMP_CHARGE=30,EMP_SPEED=7,EMP_RANGE=780,EMP_HALF_ANGLE=Math.PI/18;
 function spendEnergy(gs,s,cost){if(abilitiesLocked(gs,s)||gs.energy[s]+1e-9<cost)return false;gs.energy[s]=round(Math.max(0,gs.energy[s]-cost));gs.magEnergy[s]=gs.energy[s];return true;}
 function requestCloak(gs,s,input,fresh){
  const seq=input.cloak||0;if(seq<=gs.lastCloak[s])return;gs.lastCloak[s]=seq;
@@ -600,12 +627,12 @@ function step(gs,commands={},systems=[]) {
   for(let i=gs.respawns.length-1;i>=0;i--){const r=gs.respawns[i];r.timer=round(r.timer-TICK_MS);
     if(r.timer<=.0001){const origin=gs.config.cornerLaunches?launchOrigin(r.vx,r.vy):{x:260,y:260};gs.balls.push({id:gs.nextBallId++,...origin,vx:r.vx,vy:r.vy,contact:0});gs.respawns.splice(i,1);}}
   for(let i=gs.balls.length-1;i>=0;i--){const b=gs.balls[i],old={x:b.x,y:b.y};
-    let held=SLOTS.find(s=>b['mag_held_'+s]);
+    let held=SLOTS.find(s=>b['mag_held_'+s]),magnetControlled=false;
     if(held===undefined){b.x+=b.vx;b.y+=b.vy;
       for(const s of SLOTS)if(!gs.eliminated[s])applyFFBall(gs,s,b,old);}
     // A ball belongs to at most one magnet. Stable slot order resolves simultaneous capture.
     for(const s of SLOTS){if(gs.eliminated[s]||(held!==undefined&&held!==s))continue;
-      const had=!!b['mag_held_'+s];applyMagnetBall(gs,s,b,gs.config,old);
+      const had=!!b['mag_held_'+s];if(applyMagnetBall(gs,s,b,gs.config,old))magnetControlled=true;
       if(had!==!!b['mag_held_'+s])b.contact=(b.contact||0)+1;
       if(b['mag_held_'+s])held=s;}
     if(held===undefined){resolveChamfersBall(b);clampBallObj(b,gs.config,gs);
@@ -629,6 +656,7 @@ function step(gs,commands={},systems=[]) {
           gs.balls.splice(i,1);queueBall(gs);continue;}}
       }
     }
+    if(held===undefined&&!magnetControlled)recoverBallSpeed(b);
     for(const key of Object.keys(b))if(typeof b[key]==='number')b[key]=round(b[key]);
   }
   for(const s of SLOTS){gs.energy[s]=round(gs.energy[s]);gs.magEnergy[s]=gs.energy[s];}
@@ -642,5 +670,5 @@ function copyPhysics(value){
 function checkpoint(gs){const out={};for(const key of Object.keys(gs))out[key]=key==='events'?[]:copyPhysics(gs[key]);return out;}
 function hash(gs){const s=checkpoint(gs),str=JSON.stringify(s,(_key,value)=>value&&typeof value==='object'&&!Array.isArray(value)?Object.fromEntries(Object.keys(value).sort().map(k=>[k,value[k]])):value);let h=2166136261;
   for(let i=0;i<str.length;i++)h=Math.imul(h^str.charCodeAt(i),16777619);return (h>>>0).toString(16);}
-return {skillCost,VERSION,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall,circleSweep,enemyTarget,rocketMuzzle,abilitiesLocked,cloaked,shipVisibility,goalGeometry,shieldActive,constants:{C,W,H,ROCKET_RELOAD,ROCKET_STUN,ROCKET_OPEN,SHIELD_DURATION,SHIELD_DEPLOY,ABILITY_RELOAD,EMP_LOCK,EMP_CHARGE,EMP_SPEED,EMP_RANGE,EMP_HALF_ANGLE}};
+return {skillCost,VERSION,MAX_LIVES:ML,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall,circleSweep,enemyTarget,rocketMuzzle,abilitiesLocked,cloaked,shipVisibility,goalGeometry,shieldActive,constants:{C,W,H,ROCKET_RELOAD,ROCKET_STUN,ROCKET_OPEN,SHIELD_DEPLOY,SHIELD_DURATION,ABILITY_RELOAD,EMP_LOCK,EMP_CHARGE,EMP_SPEED,EMP_RANGE,EMP_HALF_ANGLE}};
 });
