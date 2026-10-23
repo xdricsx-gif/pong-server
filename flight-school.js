@@ -1,18 +1,22 @@
 'use strict';
-// Separate server-owned receipt prevents repeat rewards even if UI progress is reset.
+const FINAL_STEP=6;
+function normalize(p){
+ if(!p||![1,2].includes(p.version)||!Number.isInteger(p.step)||p.step<0||p.step>(p.version===1?11:FINAL_STEP))throw Error('invalid_progress');
+ const step=p.version===1?[0,1,2,3,3,4,4,5,5,6,6,6][p.step]:p.step;
+ return {version:2,step,completed:p.completed===true&&p.step===(p.version===1?11:FINAL_STEP)};
+}
 async function saveFlightSchool(db,uid,value){
  if(!uid||!db)throw Error('auth_required');
- if(value?.version!==1||!Number.isInteger(value.step)||value.step<0||value.step>11)throw Error('invalid_progress');
- const ref=db.collection('users_private').doc(uid),receipt=db.collection('flight_school_rewards').doc(uid);
+ const incoming=normalize(value),ref=db.collection('users_private').doc(uid),receipt=db.collection('flight_school_rewards').doc(uid);
  return db.runTransaction(async tx=>{
   const [profile,claim]=await Promise.all([tx.get(ref),tx.get(receipt)]);
   if(!profile.exists)throw Error('profile_missing');
-  const data=profile.data(),old=data.flightSchool||{},completed=!!old.completed||(value.completed===true&&value.step===11);
-  const progress={version:1,step:Math.max(old.step||0,value.step),completed};
+  const data=profile.data();let old;try{old=normalize(data.flightSchool);}catch{old={step:0,completed:false};}
+  const completed=old.completed||incoming.completed,progress={version:2,step:completed?FINAL_STEP:Math.max(old.step,incoming.step),completed};
   const reward=completed&&!claim.exists?300:0,silver=(Number(data.silver)||0)+reward;
   tx.set(ref,{flightSchool:progress,...(reward?{silver}:{})},{merge:true});
-  if(reward)tx.set(receipt,{version:1,silver:300,claimedAt:Date.now()});
+  if(reward)tx.set(receipt,{version:2,silver:300,claimedAt:Date.now()});
   return {progress,reward,silver};
  });
 }
-module.exports={saveFlightSchool};
+module.exports={saveFlightSchool,normalize};

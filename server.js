@@ -529,7 +529,9 @@ function getPublicConfig() {
   };
 }
 
+const handleAuthSession=require('./auth-session').createAuthSession({getAuth:()=>admin?.auth(),getDb:()=>db});
 httpServer.on('request', (req, res) => {
+  if(req.url==='/auth/session'){handleAuthSession(req,res).catch(()=>{if(!res.headersSent)res.writeHead(503,{'Cache-Control':'no-store'});res.end();});return;}
   if (handlePromo(req, res)) return;
   if (req.url === '/dashboard' || req.url.startsWith('/dashboard/')) {
     if (!footballDashboard) { res.writeHead(503, {'Content-Type':'text/plain','Cache-Control':'no-store'}); res.end('Dashboard unavailable'); return; }
@@ -2063,7 +2065,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('tutorial:progress', async (value, ack) => {
-    try { const result=await require('./flight-school').saveFlightSchool(db,socket.uid,value); if(typeof ack==='function')ack({ok:true,...result}); }
+    try { const uid=value?.idToken?await resolveUid({idToken:value.idToken}):socket.uid; const result=await require('./flight-school').saveFlightSchool(db,uid,value); if(typeof ack==='function')ack({ok:true,...result}); }
     catch(e){if(typeof ack==='function')ack({ok:false,error:e.message});}
   });
 
