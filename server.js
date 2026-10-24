@@ -16,6 +16,10 @@ const handlePromo = createPromoHandler();
 let footballDashboard = null;
 const {createPlayerActivity}=require('./player-activity');
 let playerActivity=null;
+const {createWelcome}=require('./onboarding-welcome');
+const {createWelcomeGateway}=require('./welcome-socket');
+let welcomeService=null, welcomeEnabled=false;
+const welcomeGateway=createWelcomeGateway({getService:()=>welcomeService});
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
@@ -475,7 +479,7 @@ async function verifyAuthToken(idToken) {
   if (!idToken || typeof idToken !== 'string') return null;
   try {
     const decoded = await admin.auth().verifyIdToken(idToken);
-    return { uid: decoded.uid, anonymous: decoded.firebase?.sign_in_provider === 'anonymous' };
+    return { uid: decoded.uid, anonymous: decoded.firebase?.sign_in_provider === 'anonymous', expiresAt: Number(decoded.exp)*1000 };
   } catch(e) {
     console.log('[auth] token verification failed:', e.code || e.message);
     return null;
@@ -2057,17 +2061,26 @@ io.on('connection', (socket) => {
   // SECURITY: верифікуємо idToken і використовуємо тільки verified UID.
   // Якщо Admin SDK недоступний — fallback на клієнтський uid (dev режим).
   let shopAuthGeneration=0;
+  let welcomeSession=null;
+  const welcomeConnection=welcomeGateway.attach(socket,{getSession:()=>welcomeSession});
+  socket.on('disconnect',()=>{welcomeSession=null;});
   socket.on('shop:auth', async (value, ack) => {
     const generation=++shopAuthGeneration;
+    welcomeSession=null;
     let identity=null;
     const resolvedUid = await resolveUid({idToken:value?.idToken,fallbackUid:value?.uid,
       onVerified:verified=>{identity=verified;}});
     if(!socket.connected||generation!==shopAuthGeneration)return;
     if (resolvedUid) {
       socket.uid = resolvedUid;
+      // Welcome privileges come only from this verified shop login. A UID set by
+      // matchmaking or a legacy dev fallback must never authorize a gold gift.
+      if(value?.welcomeVersion===1&&identity?.uid===resolvedUid&&!identity.anonymous&&identity.expiresAt>Date.now())
+        welcomeSession={uid:resolvedUid,generation,expiresAt:identity.expiresAt,verified:true,anonymous:false};
       footballDashboard?.presence(resolvedUid);
       const activity=playerActivity?.authenticate(socket,resolvedUid,{anonymous:!identity||identity.anonymous})||false;
-      if(typeof ack==='function')ack({ok:true,activityVersion:activity?1:null});
+      if(typeof ack==='function')ack({ok:true,activityVersion:activity?1:null,welcomeVersion:welcomeSession&&welcomeEnabled?1:null});
+      if(welcomeEnabled)welcomeConnection.authenticated();
     } else {
       playerActivity?.authenticate(socket,null);
       socket.uid = undefined;
@@ -2077,8 +2090,15 @@ io.on('connection', (socket) => {
   });
 
   socket.on('tutorial:progress', async (value, ack) => {
-    try { const uid=value?.idToken?await resolveUid({idToken:value.idToken}):socket.uid; const result=await require('./flight-school').saveFlightSchool(db,uid,value); if(typeof ack==='function')ack({ok:true,...result}); }
-    catch(e){if(typeof ack==='function')ack({ok:false,error:e.message});}
+    const generation=shopAuthGeneration;
+    try {
+      const uid=value?.idToken?await resolveUid({idToken:value.idToken}):welcomeSession?.uid;
+      if(!socket.connected||generation!==shopAuthGeneration||(welcomeSession&&welcomeSession.uid!==uid))throw Error('auth_changed');
+      const result=await require('./flight-school').saveFlightSchool(db,uid,value);
+      if(!socket.connected||generation!==shopAuthGeneration||(welcomeSession&&welcomeSession.uid!==uid))throw Error('auth_changed');
+      if(typeof ack==='function')ack({ok:true,...result});
+      if(result.progress.completed&&welcomeEnabled)welcomeConnection.afterTutorial(uid);
+    } catch(e){if(socket.connected&&typeof ack==='function')ack({ok:false,error:e.message});}
   });
 
   // ── Обмін золото → срібло ──
@@ -2613,6 +2633,8 @@ try {
       databaseURL: 'https://crazy-footbal-default-rtdb.europe-west1.firebasedatabase.app',
     });
     db = admin.firestore();
+    welcomeEnabled=typeof process.env.WELCOME_SENDER_UID==='string'&&/^[^/\x00-\x1f]{1,128}$/.test(process.env.WELCOME_SENDER_UID);
+    welcomeService=createWelcome({db,senderUid:process.env.WELCOME_SENDER_UID,senderNick:'DRICS'});
     footballDashboard = createDashboard({db, credentials:serviceAccount,
       onPlayerChanged: uid => {for(const socket of io.sockets.sockets.values())if(socket.uid===uid)socket.disconnect(true);},
       verifyIdToken: token => admin.auth().verifyIdToken(token, true),
@@ -2629,7 +2651,6 @@ try {
     playBilling = createBillingService({
       db,
       verifyIdToken: token => admin.auth().verifyIdToken(token, true),
-      listAccounts: (limit,pageToken) => admin.auth().listUsers(limit,pageToken),
       publisher: playPublisher,
       enabled: process.env.GOOGLE_PLAY_BILLING_ENABLED === 'true',
     });
