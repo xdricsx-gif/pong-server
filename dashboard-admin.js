@@ -1,5 +1,6 @@
 'use strict';
 const {createHash}=require('node:crypto');
+const {iso,playtime}=require('./dashboard-activity');
 const fail=(status,message)=>Object.assign(new Error(message),{status});
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const fields={silver:1e9,gold:1e9,xp:1e9,rating:1e7,teamRating:1e7};
@@ -11,7 +12,7 @@ function createAdmin({db,onChanged=()=>{}}){
   const [p,w,s,h,c]=await Promise.all([ref('users_public',uid).get(),ref('users_private',uid).get(),ref('dashboard_presence',createHash('sha256').update(uid).digest('hex')).get(),ref('dashboard_admin_players',uid).collection('history').orderBy('at','desc').limit(40).get(),ref('dashboard_admin_players',uid).get()]);
   if(!p.exists||!w.exists)throw fail(404,'profile_missing');
   const wallet={...w.data(),adminBanned:!!c.data()?.banned};
-  return {uid,nickname:p.data().nickname||'Гість',createdAt:p.data().createdAt||null,lastSeen:s.data()?.lastSeen||null,activeMatchId:w.data().activeMatchId||null,values:state(p.data(),wallet),revision:revision(p.data(),wallet),history:h.docs.map(d=>d.data())};
+  return {uid,nickname:p.data().nickname||'Гість',createdAt:iso(p.data().createdAt),...playtime(s.data()),activeMatchId:w.data().activeMatchId||null,values:state(p.data(),wallet),revision:revision(p.data(),wallet),history:h.docs.map(d=>d.data())};
  }
  async function list(url){
   const q=(url.searchParams.get('q')||'').trim().toLocaleLowerCase();if(q.length>128)throw fail(400,'invalid_search');
@@ -22,7 +23,7 @@ function createAdmin({db,onChanged=()=>{}}){
    for(const d of page.docs){last=d.id;consumed++;scanned++;const p=d.data();if(!q||d.id.toLowerCase().includes(q)||String(p.nickname||'').toLocaleLowerCase().includes(q))rows.push({uid:d.id,nickname:p.nickname||'Гість',rating:p.rating??500,gamesPlayed:p.gamesPlayed||0});if(rows.length===50)break;}
    more=consumed<page.size||page.size===250;if(!more||rows.length===50)break;query=db.collection('users_public').orderBy('__name__').startAfter(last).limit(250);
   }
-  const result=await Promise.all(rows.map(async p=>{const s=await ref('dashboard_presence',createHash('sha256').update(p.uid).digest('hex')).get();return {...p,lastSeen:s.data()?.lastSeen||null};}));
+  const result=await Promise.all(rows.map(async p=>{const s=await ref('dashboard_presence',createHash('sha256').update(p.uid).digest('hex')).get();return {...p,...playtime(s.data())};}));
   return {rows:result,cursor:more?last:null,scanned};
  }
  async function mutate(uid,body,actor){

@@ -14,6 +14,8 @@ const { createDashboard } = require('./football-dashboard');
 const { createPromoHandler } = require('./football-promo');
 const handlePromo = createPromoHandler();
 let footballDashboard = null;
+const {createPlayerActivity}=require('./player-activity');
+let playerActivity=null;
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
@@ -473,7 +475,7 @@ async function verifyAuthToken(idToken) {
   if (!idToken || typeof idToken !== 'string') return null;
   try {
     const decoded = await admin.auth().verifyIdToken(idToken);
-    return { uid: decoded.uid };
+    return { uid: decoded.uid, anonymous: decoded.firebase?.sign_in_provider === 'anonymous' };
   } catch(e) {
     console.log('[auth] token verification failed:', e.code || e.message);
     return null;
@@ -484,11 +486,12 @@ async function verifyAuthToken(idToken) {
 // - Якщо Admin SDK доступний → вимагає валідний idToken, повертає verified uid.
 // - Якщо Admin SDK недоступний → fallback на клієнтський uid (для dev).
 // Повертає string uid або null.
-async function resolveUid({ idToken, fallbackUid }) {
+async function resolveUid({ idToken, fallbackUid, onVerified }) {
   if (!admin) return fallbackUid || null; // legacy fallback
   const verified = await verifyAuthToken(idToken);
   if(!verified)return null;
   try{if((await db.collection('dashboard_admin_players').doc(verified.uid).get()).data()?.banned)return null;}catch{return null;}
+  onVerified?.(verified);
   return verified.uid;
 }
 
@@ -2053,14 +2056,23 @@ io.on('connection', (socket) => {
   // Аутентифікація для shop без mm:join (з меню/магазину)
   // SECURITY: верифікуємо idToken і використовуємо тільки verified UID.
   // Якщо Admin SDK недоступний — fallback на клієнтський uid (dev режим).
-  socket.on('shop:auth', async ({ uid, idToken }) => {
-    const resolvedUid = await resolveUid({ idToken, fallbackUid: uid });
+  let shopAuthGeneration=0;
+  socket.on('shop:auth', async (value, ack) => {
+    const generation=++shopAuthGeneration;
+    let identity=null;
+    const resolvedUid = await resolveUid({idToken:value?.idToken,fallbackUid:value?.uid,
+      onVerified:verified=>{identity=verified;}});
+    if(!socket.connected||generation!==shopAuthGeneration)return;
     if (resolvedUid) {
       socket.uid = resolvedUid;
       footballDashboard?.presence(resolvedUid);
+      const activity=playerActivity?.authenticate(socket,resolvedUid,{anonymous:!identity||identity.anonymous})||false;
+      if(typeof ack==='function')ack({ok:true,activityVersion:activity?1:null});
     } else {
+      playerActivity?.authenticate(socket,null);
       socket.uid = undefined;
       socket.emit('shop:error', { msg: 'auth_required' });
+      if(typeof ack==='function')ack({ok:false,error:'auth_required'});
     }
   });
 
@@ -2550,7 +2562,7 @@ io.on('connection', (socket) => {
 matchService=createMatchService({io,rooms,createRoom,setPlayer:setSlotPlayer,clearPlayer:clearSlotPlayer,getPlayer:getSlotPlayer,startGame,net:netcode2,getDb:()=>db,authenticate:resolveUid,loadStats:loadValidatedPaddleStats,onSettled:(room,result)=>{
   if(!result.aborted){const deltas=Object.fromEntries(Object.entries(result.rewards).map(([slot,r])=>[slot,r.ratingDelta]));void trackGameEnd(room,result.winnerSlot,result.places,room.mode==='training',deltas);footballDashboard?.match(room,room.mode==='training');}
 }});
-io.on('connection',socket=>matchService.attach(socket));
+io.on('connection',socket=>{matchService.attach(socket);playerActivity?.attach(socket);});
 httpServer.listen(PORT, () => console.log(`Server on port ${PORT}, ${TICK_RATE} ticks/sec`));
 
 // ── Лог активних кімнат кожні 30с ──
@@ -2607,6 +2619,7 @@ try {
       live: () => ({online:new Set([...io.sockets.sockets.values()].map(s=>s.uid).filter(Boolean)).size,
         rooms:[...rooms.values()].filter(r=>r.status==='playing').length, connections:io.engine.clientsCount})});
     footballDashboard.initialize();
+    playerActivity=createPlayerActivity({db});
     console.log('Firebase Admin initialized');
     const playPublisher = createPublisher(serviceAccount);
     playPublisher.checkAccess()
@@ -2954,6 +2967,8 @@ async function gracefulShutdown(signal) {
     await new Promise(resolve => {
       io.close(() => { console.log('[shutdown] Socket.IO closed'); resolve(); });
     });
+
+    await playerActivity?.close();
 
     // 5. Закриваємо PostgreSQL pool — waits for in-flight queries
     if (pgPool) {
