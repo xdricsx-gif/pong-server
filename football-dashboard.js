@@ -5,12 +5,12 @@ const {PACKAGE,day,aggregateInstalls,summarizeOrders}=require('./dashboard-data'
 const {createActivity}=require('./dashboard-activity');
 const {createPlayReports}=require('./dashboard-play-reports');
 const PUBLIC_FIREBASE={apiKey:'AIzaSyCLri9CBFVYbdXzIuJ4QLc9Lm7YNkaD9Ac',authDomain:'crazy-footbal.firebaseapp.com',projectId:'crazy-footbal',appId:'1:348183694114:web:303c7ef63e5f0a857c337b'};
-function createDashboard({db,verifyIdToken,credentials,live,onPlayerChanged,bucket=process.env.PLAY_REPORTS_BUCKET||'pubsite_prod_6971140736608519774',owner=process.env.DASHBOARD_OWNER_EMAIL||'xdricsx@gmail.com'}) {
+function createDashboard({db,verifyIdToken,listAccounts,credentials,live,onPlayerChanged,bucket=process.env.PLAY_REPORTS_BUCKET||'pubsite_prod_6971140736608519774',owner=process.env.DASHBOARD_OWNER_EMAIL||'xdricsx@gmail.com'}) {
   const playerAdmin=require('./dashboard-admin').createAdmin({db,onChanged:async uid=>{cache.clear();activityData.invalidatePlayers();await onPlayerChanged?.(uid);}});
   const storageAuth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/devstorage.read_only']});
   const playAuth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/androidpublisher']});
   const cache=new Map(); const rates=new Map(); let failureCount=0,lastManualRefresh=0;
-  const activityData=createActivity({db,onFailure:()=>failureCount++});
+  const activityData=createActivity({db,listAccounts,onFailure:()=>failureCount++});
   const playReports=createPlayReports({db,bucket,download:({bucket,name,signal})=>google(storageAuth,`https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encodeURIComponent(name)}?alt=media`,{responseType:'arraybuffer',signal})});
   async function cached(key,ms,fn){let c=cache.get(key);if(c && c.until>Date.now())return c.promise;const promise=fn();cache.set(key,{until:Date.now()+ms,promise});try{return await promise;}catch(e){if(cache.get(key)?.promise===promise)cache.delete(key);throw e;}}
   async function google(auth,url,opts={}){const client=await auth.getClient();try{return (await client.request({url,method:'GET',timeout:20000,...opts})).data;}catch(e){let body=e.response?.data;try{if(body?.text)body=await body.text();if(Buffer.isBuffer(body)||ArrayBuffer.isView(body)||body instanceof ArrayBuffer)body=Buffer.from(body).toString();if(typeof body==='string')body=JSON.parse(body);e.reportReason=body?.error?.errors?.[0]?.reason||body?.error?.status||'unknown';}catch{}throw e;}}

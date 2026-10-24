@@ -2616,6 +2616,7 @@ try {
     footballDashboard = createDashboard({db, credentials:serviceAccount,
       onPlayerChanged: uid => {for(const socket of io.sockets.sockets.values())if(socket.uid===uid)socket.disconnect(true);},
       verifyIdToken: token => admin.auth().verifyIdToken(token, true),
+      listAccounts: (limit,pageToken) => admin.auth().listUsers(limit,pageToken),
       live: () => ({online:new Set([...io.sockets.sockets.values()].map(s=>s.uid).filter(Boolean)).size,
         rooms:[...rooms.values()].filter(r=>r.status==='playing').length, connections:io.engine.clientsCount})});
     footballDashboard.initialize();
@@ -2628,6 +2629,7 @@ try {
     playBilling = createBillingService({
       db,
       verifyIdToken: token => admin.auth().verifyIdToken(token, true),
+      listAccounts: (limit,pageToken) => admin.auth().listUsers(limit,pageToken),
       publisher: playPublisher,
       enabled: process.env.GOOGLE_PLAY_BILLING_ENABLED === 'true',
     });

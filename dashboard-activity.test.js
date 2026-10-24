@@ -38,7 +38,7 @@ test('recent registrations are bounded, newest first, timestamps normalized and 
  f.rows.set('users_public/legacy',{nickname:'Unknown date'});
  const hash=createHash('sha256').update('u40').digest('hex');f.rows.set('dashboard_presence/'+hash,{measuredSince:'2026-10-24T00:00:00Z',foregroundSeconds:0,lastSeen:'2026-10-24T11:59:00Z'});
  const r=await f.activity.get(...range);assert.equal(r.recentPlayers.length,30);assert.equal(r.recentPlayers[0].uid,'u40');assert.equal(r.recentPlayers[0].foregroundSeconds,0);assert.equal(r.recentPlayers[1].foregroundSeconds,null);assert.match(r.recentPlayers[0].createdAt,/Z$/);
- await f.activity.get(...range);assert.equal(f.counts.get('users_public'),1);f.advance(30001);await f.activity.get(...range);assert.equal(f.counts.get('users_public'),2);
+ await f.activity.get(...range);assert.equal(f.counts.get('users_public'),1);f.advance(60001);await f.activity.get(...range);assert.equal(f.counts.get('users_public'),2);
 });
 test('failed match writes are not counted as persisted and date filters stay accurate',async()=>{
  const f=fixture();await f.activity.record({id:'old',startedAt:f.now()-1000},false);assert.equal((await f.activity.get('2026-10-01','2026-10-23')).activity.count,0);
@@ -53,4 +53,10 @@ test('fast activity route has the same owner-only protection and never needs Goo
  const d=createDashboard({db:f.db,credentials:{},verifyIdToken:async()=>claims,live:()=>({online:3,rooms:1})});
  async function call(auth=true){let status,body;await d.handle({method:'GET',url:'/dashboard/api/activity?from=2026-10-01&to=2026-10-24',headers:auth?{authorization:'Bearer x'}:{},socket:{remoteAddress:'local'}},{writeHead:s=>status=s,end:b=>body=JSON.parse(b)});return {status,body};}
  assert.equal((await call(false)).status,401);const r=await call();assert.equal(r.status,200);assert.equal(r.body.live.online,3);assert.equal(r.body.activity.count,0);claims={...claims,email:'someone@example.com'};assert.equal((await call()).status,403);
+});
+
+test('recent registrations use trusted Firebase Auth dates, not device-clock profile dates',async()=>{
+ const f=fixture();f.rows.set('users_public/a',{nickname:'A',createdAt:'2099-01-01'});f.rows.set('users_public/b',{nickname:'B',createdAt:'2020-01-01'});
+ const a=createActivity({db:f.db,now:f.now,listAccounts:async()=>({users:[{uid:'a',metadata:{creationTime:'2026-10-01'}},{uid:'b',metadata:{creationTime:'2026-10-24'}},{uid:'other-app-only',metadata:{creationTime:'2026-10-24'}}]})});
+ const r=await a.get(...range);assert.deepEqual(r.recentPlayers.map(p=>p.uid),['b','a']);assert.equal(r.recentPlayers[1].createdAt,'2026-10-01T00:00:00.000Z');
 });
