@@ -60,3 +60,10 @@ test('recent registrations use trusted Firebase Auth dates, not device-clock pro
  const a=createActivity({db:f.db,now:f.now,listAccounts:async()=>({users:[{uid:'a',metadata:{creationTime:'2026-10-01'}},{uid:'b',metadata:{creationTime:'2026-10-24'}},{uid:'other-app-only',metadata:{creationTime:'2026-10-24'}}]})});
  const r=await a.get(...range);assert.deepEqual(r.recentPlayers.map(p=>p.uid),['b','a']);assert.equal(r.recentPlayers[1].createdAt,'2026-10-01T00:00:00.000Z');
 });
+
+test('match day filters and daily totals follow Kyiv local midnight across the fall DST transition',async()=>{
+ const f=fixture();const times=['2026-10-24T20:59:59Z','2026-10-24T21:00:00Z','2026-10-25T00:30:00Z','2026-10-25T01:30:00Z','2026-10-25T21:59:59Z','2026-10-25T22:00:00Z'];
+ for(let i=0;i<times.length;i++){f.advance(Date.parse(times[i])-f.now());await f.activity.record({id:'kyiv'+i,startedAt:f.now()-1000},false);}
+ const r=await f.activity.get('2026-10-25','2026-10-25');assert.equal(r.activity.count,4);assert.deepEqual(r.activity.daily,[{date:'2026-10-25',matches:4}]);
+ assert.equal((await f.activity.get('2026-10-24','2026-10-24')).activity.count,1);assert.equal((await f.activity.get('2026-10-26','2026-10-26')).activity.count,1);
+});

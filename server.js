@@ -14,6 +14,9 @@ const { createDashboard } = require('./football-dashboard');
 const { createPromoHandler } = require('./football-promo');
 const handlePromo = createPromoHandler();
 let footballDashboard = null;
+const {createPushService}=require('./push-service');
+const {createPushHttp}=require('./push-http');
+let pushService=null;
 const {createPlayerActivity}=require('./player-activity');
 let playerActivity=null;
 const {createWelcome}=require('./onboarding-welcome');
@@ -537,7 +540,9 @@ function getPublicConfig() {
 }
 
 const handleAuthSession=require('./auth-session').createAuthSession({getAuth:()=>admin?.auth(),getDb:()=>db});
+const handlePush=createPushHttp({getService:()=>pushService,verifyIdToken:token=>admin.auth().verifyIdToken(token,true)});
 httpServer.on('request', (req, res) => {
+  if(req.url.startsWith('/push/')){handlePush(req,res).catch(()=>{if(!res.headersSent)res.writeHead(503,{'Cache-Control':'no-store'});res.end();});return;}
   if(req.url==='/auth/session'){handleAuthSession(req,res).catch(()=>{if(!res.headersSent)res.writeHead(503,{'Cache-Control':'no-store'});res.end();});return;}
   if (handlePromo(req, res)) return;
   if (req.url === '/dashboard' || req.url.startsWith('/dashboard/')) {
@@ -1968,6 +1973,8 @@ function startGame(room) {
   }
   room.tickInterval = room.net2 ? null : setInterval(() => tick(room), TICK_MS);
   room.startedAt = Date.now(); // для підрахунку тривалості матчу
+  for(const uid of new Set(Object.values(room.players).map(player=>player.uid).filter(Boolean)))
+    void pushService?.recordMatch(uid).catch(()=>{});
 
   // ── Аналітика: подія старту матчу (для drop-off rate) ──
   try {
@@ -2078,6 +2085,7 @@ io.on('connection', (socket) => {
       if(value?.welcomeVersion===1&&identity?.uid===resolvedUid&&!identity.anonymous&&identity.expiresAt>Date.now())
         welcomeSession={uid:resolvedUid,generation,expiresAt:identity.expiresAt,verified:true,anonymous:false};
       footballDashboard?.presence(resolvedUid);
+      if(identity?.uid===resolvedUid&&!identity.anonymous)void pushService?.markAuthenticated(resolvedUid).catch(()=>{});
       const activity=playerActivity?.authenticate(socket,resolvedUid,{anonymous:!identity||identity.anonymous})||false;
       if(typeof ack==='function')ack({ok:true,activityVersion:activity?1:null,welcomeVersion:welcomeSession&&welcomeEnabled?1:null});
       if(welcomeEnabled)welcomeConnection.authenticated();
@@ -2635,7 +2643,9 @@ try {
     db = admin.firestore();
     welcomeEnabled=typeof process.env.WELCOME_SENDER_UID==='string'&&/^[^/\x00-\x1f]{1,128}$/.test(process.env.WELCOME_SENDER_UID);
     welcomeService=createWelcome({db,senderUid:process.env.WELCOME_SENDER_UID,senderNick:'DRICS'});
-    footballDashboard = createDashboard({db, credentials:serviceAccount,
+    pushService=createPushService({db,send:message=>admin.messaging().send(message)});
+    void pushService.resume().catch(()=>console.log('[push] recovery unavailable'));
+    footballDashboard = createDashboard({db, credentials:serviceAccount,pushService,
       onPlayerChanged: uid => {for(const socket of io.sockets.sockets.values())if(socket.uid===uid)socket.disconnect(true);},
       verifyIdToken: token => admin.auth().verifyIdToken(token, true),
       listAccounts: (limit,pageToken) => admin.auth().listUsers(limit,pageToken),
@@ -2992,6 +3002,7 @@ async function gracefulShutdown(signal) {
     });
 
     await playerActivity?.close();
+    await pushService?.stop();
 
     // 5. Закриваємо PostgreSQL pool — waits for in-flight queries
     if (pgPool) {

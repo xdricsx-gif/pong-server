@@ -128,7 +128,7 @@ function serverFixture() {
   const welcomeGateway=createWelcomeGateway({getService:()=>service});
   const context={socket,welcomeGateway,welcomeEnabled:true,
     resolveUid:args=>new Promise(resolve=>auths.push({args,resolve})),
-    footballDashboard:{presence(){}},playerActivity:{authenticate:()=>true},
+    pushService:{markAuthenticated:async()=>{}},footballDashboard:{presence(){}},playerActivity:{authenticate:()=>true},
     require:name=>{assert.equal(name,'./flight-school');return {async saveFlightSchool(db,uid,value){progress.push([uid,value]);return {progress:{completed:true},reward:0,silver:300};}};},db:{},
   };
   vm.runInNewContext(source.slice(start,end),context);

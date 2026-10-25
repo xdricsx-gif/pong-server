@@ -123,7 +123,7 @@ test('shop auth ACK is bound to the latest verified request and a live socket',a
  const handlers=new Map(),pending=[],acks=[],authenticated=[],seen=[];
  const socket={connected:true,on:(name,fn)=>handlers.set(name,fn),emit(){}};
  vm.runInNewContext(block,{socket,welcomeEnabled:false,welcomeGateway:{attach:()=>({authenticated(){}})},resolveUid:args=>new Promise(resolve=>pending.push({args,resolve})),
-   footballDashboard:{presence:uid=>seen.push(uid)},playerActivity:{authenticate:(...args)=>{authenticated.push(args);return !args[2]?.anonymous;}}});
+   pushService:{markAuthenticated:async()=>{}},footballDashboard:{presence:uid=>seen.push(uid)},playerActivity:{authenticate:(...args)=>{authenticated.push(args);return !args[2]?.anonymous;}}});
  const first=handlers.get('shop:auth')({idToken:'old'},result=>acks.push(result));
  const latest=handlers.get('shop:auth')({idToken:'new'},result=>acks.push(result));
  pending[1].args.onVerified({uid:'new',anonymous:false});pending[1].resolve('new');await latest;

@@ -1,6 +1,6 @@
 'use strict';
 const PACKAGE = 'com.galaxyfootball.app';
-const day = value => { const d = value?.toDate ? value.toDate() : new Date(value); return Number.isFinite(+d) ? d.toISOString().slice(0,10) : null; };
+const {day}=require('./dashboard-time');
 function csvRows(input) {
   let text = Buffer.isBuffer(input) ? input.toString(input[0]===255 && input[1]===254 ? 'utf16le' : 'utf8') : input;
   text = text.replace(/^\uFEFF/,'');
