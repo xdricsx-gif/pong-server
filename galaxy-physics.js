@@ -6,7 +6,7 @@
 else root.GalaxyPhysics=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 
-const VERSION='gf-net2-14';
+const VERSION='gf-net2-15';
 // Rollback switch: new matches may opt out with cornerLaunches:false.
 const CORNER_LAUNCHES=false;
 function launchOrigin(vx,vy){const speed=Math.hypot(vx,vy)||1;return {x:(vx<0?520:0)+vx/speed*64,y:(vy<0?520:0)+vy/speed*64};}
@@ -651,7 +651,8 @@ function step(gs,commands={},systems=[]) {
     const fresh=gs.connected[s]&&gs.tick-input.tick<=8;
     if((!gs.config.emptyStartEnergy||gs.nextBallId>1)&&!f.active&&!abilitiesLocked(gs,s)&&!(fresh&&input.magnet))gs.energy[s]=Math.min(1,gs.energy[s]+ECR*TICK_MS*stats.er);
     const wanted=input.target===null?input.dx*stats.spd:clamp(input.target-gs.paddles[s],-stats.spd,stats.spd);
-    gs.paddles[s]=round(clamp(gs.paddles[s]+(fresh&&gs.tick>=gs.stunUntil[s]?wanted:0),C+stats.w/2,W-C-stats.w/2));
+    const limits=gateBounds(gs);
+    gs.paddles[s]=round(clamp(gs.paddles[s]+(fresh&&gs.tick>=gs.stunUntil[s]?wanted:0),limits.min+stats.w/2,limits.max-stats.w/2));
     requestCloak(gs,s,input,fresh);requestRocket(gs,s,input,fresh);requestShield(gs,s,input,fresh);requestEMP(gs,s,input,fresh);
     if(input.boost>gs.lastBoost[s]){gs.lastBoost[s]=input.boost;
       if(fresh&&!abilitiesLocked(gs,s)&&!f.active&&gs.energy[s]>=skillCost(gs,s,'push')){f.active=true;f.t=0;f.r=0;f.maxR=stats.fr;gs.energy[s]-=skillCost(gs,s,'push');gs.cloakUntil[s]=0;

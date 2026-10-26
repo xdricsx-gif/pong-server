@@ -260,8 +260,8 @@ class Client {
     for(const [slot,c] of this.paddleCorrections){
       const age=Math.max(0,now-c.time),t=clamp(age/100,0,1);
       if(t===1||w.eliminated[slot]){this.paddleCorrections.delete(slot);continue;}
-      const half=w.config.players[slot].paddleStats.w/2;
-      w.paddles[slot]=clamp(w.paddles[slot]+c.offset*(1-t)*(1-t),54+half,466-half);
+      const half=w.config.players[slot].paddleStats.w/2,gate=P.gateBounds(w);
+      w.paddles[slot]=clamp(w.paddles[slot]+c.offset*(1-t)*(1-t),gate.min+half,gate.max-half);
     }
     // Bound render-only catch-up between frames as well as at packet arrival.
     // A delayed snapshot can move the prediction horizon forward several ticks.
@@ -275,6 +275,8 @@ class Client {
       }
       this.remotePresentation.set(slot,{position:w.paddles[slot],time:now});
     }
+    const gate=P.gateBounds(w);
+    for(const slot of P.SLOTS){if(w.eliminated[slot])continue;const half=w.config.players[slot].paddleStats.w/2;w.paddles[slot]=clamp(w.paddles[slot],gate.min+half,gate.max-half);}
     for(const b of w.balls){const old=prev.balls.find(x=>x.id===b.id),held=P.SLOTS.find(s=>b['mag_held_'+s]);
       if(held!==undefined){const p=P.slotToPaddle(held,w.paddles[held],w,w.config);b.x=p.x+p.w/2+(b['mag_offX_'+held]||0);b.y=p.y+p.h/2+(b['mag_offY_'+held]||0);}
       else if(old&&old.contact===b.contact){b.x=old.x+(b.x-old.x)*alpha;b.y=old.y+(b.y-old.y)*alpha;}
