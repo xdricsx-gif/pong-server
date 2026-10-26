@@ -6,7 +6,7 @@
 else root.GalaxyPhysics=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 
-const VERSION='gf-net2-13';
+const VERSION='gf-net2-14';
 // Rollback switch: new matches may opt out with cornerLaunches:false.
 const CORNER_LAUNCHES=false;
 function launchOrigin(vx,vy){const speed=Math.hypot(vx,vy)||1;return {x:(vx<0?520:0)+vx/speed*64,y:(vy<0?520:0)+vy/speed*64};}
@@ -505,11 +505,48 @@ function queueBall(gs,delay) {
   const tail=gs.respawns.reduce((m,r)=>Math.max(m,r.timer),0);
   gs.respawns.push({timer:delay??Math.max(2000,tail+2000),vx:round(Math.cos(ang)*speed),vy:round(Math.sin(ang)*speed)});
 }
+
+// Authoritative match ticks also drive rendering, reconnection and replay.
+function gateReduction(gs){
+ if(!gs.config.timedGates)return 0;
+ const t=gs.tick/TICK_RATE,ease=x=>{x=clamp(x,0,1);return x*x*(3-2*x);};
+ if(t<60)return .4;
+ if(t<120)return .4-.2*ease((t-60)/.85);
+ return .2-.15*ease((t-120)/.85);
+}
+function gateBounds(gs){const inset=(W-2*C)*gateReduction(gs)/2;return {min:C+inset,max:W-C-inset,depth:17};}
+function collideGate(gs,b){
+ if(!gs.config.timedGates)return false;
+ const g=gateBounds(gs);let hit=false;
+ for(const s of gs.config.activeSlots){
+  if(gs.eliminated[s])continue;
+  let u=s<2?b.x:b.y,v=s===0?H-b.y:s===1?b.y:s===2?b.x:W-b.x;
+  if(v>g.depth+BR||v < -BR)continue;
+  const outer=Math.min(g.min-C,41.2);
+  const pieces=[[C,C+outer,17],[W-C-outer,W-C,17]];
+  if(g.min>C+outer)pieces.push([C+outer,g.min,12],[g.max,W-C-outer,12]);
+  for(const [lo,hi,depth] of pieces){
+   const qx=clamp(u,lo,hi),qy=clamp(v,-20,depth);
+   let dx=u-qx,dy=v-qy,d=Math.hypot(dx,dy);
+   if(d>=BR)continue;
+   if(d<1e-8){dx=0;dy=1;d=0;}else{dx/=d;dy/=d;}
+   u+=dx*(BR-d+.001);v+=dy*(BR-d+.001);
+   let vu=s<2?b.vx:b.vy,vv=s===0?-b.vy:s===1?b.vy:s===2?b.vx:-b.vx;
+   const dot=vu*dx+vv*dy;if(dot<0){vu-=2*dot*dx;vv-=2*dot*dy;}
+   if(s<2){b.x=u;b.y=s===0?H-v:v;b.vx=vu;b.vy=s===0?-vv:vv;}
+   else{b.y=u;b.x=s===2?v:W-v;b.vy=vu;b.vx=s===2?vv:-vv;}
+   b.contact=(b.contact||0)+1;hit=true;
+  }
+ }
+ return hit;
+}
+
 function create(options={}) {
   const mode=['ranked','team','duel','training'].includes(options.mode)?options.mode:'ranked';
   const config={players:[],mode,activeSlots:mode==='duel'?[0,1]:[0,1,2,3],teams:mode==='team'?[0,1,1,0]:null,durationTicks:options.durationTicks||10800};
   config.cornerLaunches=options.cornerLaunches??CORNER_LAUNCHES;
   config.emptyStartEnergy=!!options.emptyStartEnergy;
+  config.timedGates=options.timedGates!==false;
   const arr=v=>SLOTS.map(()=>typeof v==='function'?v():v);
   for(const s of SLOTS){const p=options.players?.[s]||{},st=p.paddleStats||{};
     config.players[s]={bot:!!p.bot,paddleStats:{shipId:['nexus','swift','bastion','flux'].includes(st.shipId)?st.shipId:'nexus',level:clamp(Math.trunc(st.level||1),1,5),w:clamp(st.w||PL,10,250),spd:clamp(st.spd||PS,.1,50),
@@ -636,7 +673,7 @@ function step(gs,commands={},systems=[]) {
       if(had!==!!b['mag_held_'+s])b.contact=(b.contact||0)+1;
       if(b['mag_held_'+s])held=s;}
     if(held===undefined){resolveChamfersBall(b);clampBallObj(b,gs.config,gs);
-      let hit=false;for(const s of SLOTS)if(!gs.eliminated[s]&&paddleContact(gs,s,b,old)){hit=true;break;}
+      let hit=collideGate(gs,b);for(const s of SLOTS)if(!hit&&!gs.eliminated[s]&&paddleContact(gs,s,b,old)){hit=true;break;}
       if(!hit){let goal=-1;
         if(b.y-BR<0&&b.x>C&&b.x<W-C)goal=1;
         else if(b.y+BR>H&&b.x>C&&b.x<W-C)goal=0;
@@ -670,5 +707,5 @@ function copyPhysics(value){
 function checkpoint(gs){const out={};for(const key of Object.keys(gs))out[key]=key==='events'?[]:copyPhysics(gs[key]);return out;}
 function hash(gs){const s=checkpoint(gs),str=JSON.stringify(s,(_key,value)=>value&&typeof value==='object'&&!Array.isArray(value)?Object.fromEntries(Object.keys(value).sort().map(k=>[k,value[k]])):value);let h=2166136261;
   for(let i=0;i<str.length;i++)h=Math.imul(h^str.charCodeAt(i),16777619);return (h>>>0).toString(16);}
-return {skillCost,VERSION,MAX_LIVES:ML,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall,circleSweep,enemyTarget,rocketMuzzle,abilitiesLocked,cloaked,shipVisibility,goalGeometry,shieldActive,constants:{C,W,H,ROCKET_RELOAD,ROCKET_STUN,ROCKET_OPEN,SHIELD_DEPLOY,SHIELD_DURATION,ABILITY_RELOAD,EMP_LOCK,EMP_CHARGE,EMP_SPEED,EMP_RANGE,EMP_HALF_ANGLE}};
+return {gateReduction,gateBounds,collideGate,skillCost,VERSION,MAX_LIVES:ML,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall,circleSweep,enemyTarget,rocketMuzzle,abilitiesLocked,cloaked,shipVisibility,goalGeometry,shieldActive,constants:{C,W,H,ROCKET_RELOAD,ROCKET_STUN,ROCKET_OPEN,SHIELD_DEPLOY,SHIELD_DURATION,ABILITY_RELOAD,EMP_LOCK,EMP_CHARGE,EMP_SPEED,EMP_RANGE,EMP_HALF_ANGLE}};
 });
