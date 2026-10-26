@@ -50,7 +50,7 @@ function createWelcome({db, senderUid, senderNick = 'DRICS', now = Date.now}) {
   }
   function completion(profile, receipt) {
     try {
-      return normalize(profile.flightSchool).completed && receipt.exists && [1, 2].includes(receipt.data()?.version);
+      return normalize(profile.flightSchool).completed && receipt.exists && [1, 2, 3].includes(receipt.data()?.version);
     } catch { return false; }
   }
   function identity(uid, record) {

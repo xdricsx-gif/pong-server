@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const P=require('./galaxy-physics'),N=require('./galaxy-netcode'),Wire=require('./galaxy-wire');
-const world=(mode='ranked')=>{const w=P.create({mode,durationTicks:60000});w.respawns=[];return w;};
+const world=(mode='ranked')=>{const w=P.create({mode,durationTicks:60000,timedGates:false});w.respawns=[];return w;};
 const cmd=(t,extra={})=>({tick:t,seq:t,dx:0,boost:0,magnet:false,target:null,rocket:0,rocketTarget:-1,shield:0,emp:0,empX:null,empY:null,...extra});
 const stepTo=(w,t)=>{while(w.tick<t)P.step(w);};
 function shoot(w,s,axis=330){const g=P.goalGeometry(s),x=s<2?axis:g.a.x+g.nx*10,y=s<2?g.a.y+g.ny*10:axis;w.balls=[{id:1,x,y,vx:-g.nx*4,vy:-g.ny*4,contact:0}];}
