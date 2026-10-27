@@ -9,11 +9,11 @@ test('migration preserves old purchases and refunds currency exactly once',()=>{
 test('hull and skill prices; replayed request and insufficient wallet cannot debit',()=>{
  const a=E.apply({silver:10000,gold:0},{type:'hull',key:'nexus',expectedLevel:1});assert.equal(a.silver,7000);assert.equal(a.economy.ships.nexus,2);
  assert.throws(()=>E.apply(a,{type:'hull',key:'nexus',expectedLevel:1}),/stale_progress/);
- const b=E.apply(a,{type:'skill',key:'emp',expectedLevel:1});assert.equal(b.silver,5000);assert.equal(b.economy.skills.emp,2);assert.equal(b.economy.ships.nexus,2);
- assert.throws(()=>E.apply(b,{type:'skill',key:'emp',expectedLevel:2}),/not_enough_silver/);
+ const b=E.apply(a,{type:'skill',key:'push',expectedLevel:1});assert.equal(b.silver,5000);assert.equal(b.economy.skills.push,2);assert.equal(b.economy.ships.nexus,2);
+ assert.throws(()=>E.apply(b,{type:'skill',key:'push',expectedLevel:2}),/not_enough_silver/);
 });
 test('ships share skills, have independent hulls and are not charged twice',()=>{
- let p=E.apply({silver:200000,gold:1000},{type:'skill',key:'shield',expectedLevel:1});p=E.apply(p,{type:'ship',key:'swift',currency:'silver'});assert.equal(p.silver,138000);assert.equal(p.economy.ships.swift,1);assert.equal(p.economy.skills.shield,2);
+ let p=E.apply({silver:200000,gold:1000,xp:1600},{type:'skill_buy',key:'shield'});p=E.apply(p,{type:'skill',key:'shield',expectedLevel:1});p=E.apply(p,{type:'ship',key:'swift',currency:'silver'});assert.equal(p.silver,126000);assert.equal(p.economy.ships.swift,1);assert.equal(p.economy.skills.shield,2);
  const q=E.apply(p,{type:'ship',key:'swift',currency:'gold'});assert.equal(q.gold,p.gold);assert.equal(q.silver,p.silver);
 });
 test('mission reward is one-time and expires at UTC midnight',()=>{

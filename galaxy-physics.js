@@ -6,7 +6,7 @@
 else root.GalaxyPhysics=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
 'use strict';
 
-const VERSION='gf-net2-15';
+const VERSION='gf-net2-16';
 // Rollback switch: new matches may opt out with cornerLaunches:false.
 const CORNER_LAUNCHES=false;
 function launchOrigin(vx,vy){const speed=Math.hypot(vx,vy)||1;return {x:(vx<0?520:0)+vx/speed*64,y:(vy<0?520:0)+vy/speed*64};}
@@ -28,9 +28,12 @@ const SLOTS=[0,1,2,3],SLOT_VIEW=['bottom','top','left','right'];
 const ELIM_WALL_BOOST=1.30,ELIM_WALL_RANDOM_DEG=25,ELIM_WALL_MIN_SP=3.5,ELIM_WALL_MAX_SP=6.5;
 const MAG_R=75,MAG_PULL_FORCE=1.15,MAG_CAPTURE_RADIUS=3,MAG_RELEASE_PUSH=SMAX;
 const MAG_DRAIN_PER_MS=1/5000,MAG_REGEN_PER_MS=1/10000,MAG_START_COST=.20;
-function skillProgress(gs,s,key){return Math.max(0,Math.min(4,(gs.config.players[s].paddleStats.skills?.[key]||1)-1))/4;}
+const MAX_SKILL_LEVEL=10,ACTIVE_SKILLS=['push','cloak','magnet','rocket','emp','shield'];
+function skillEquipped(gs,s,key){const stats=gs.config.players[s].paddleStats;return !Object.prototype.hasOwnProperty.call(stats,'equippedSkills')||(Array.isArray(stats.equippedSkills)&&stats.equippedSkills.includes(key));}
+function levelProgress(level){return Math.max(0,Math.min(MAX_SKILL_LEVEL-1,Math.trunc(Number(level)||1)-1))/4;}
+function skillProgress(gs,s,key){return levelProgress(gs.config.players[s].paddleStats.skills?.[key]);}
 function skillCost(gs,s,key){const base={push:EPU,magnet:.20,rocket:.30,shield:.40,emp:.50,cloak:.40}[key];return base*(1-({push:.10,emp:.08,cloak:.10}[key]||0)*skillProgress(gs,s,key));}
-function magnetRadius(stats){return clamp(MAG_R*(stats?.skills?1+.12*((stats.skills.magnet||1)-1)/4:(stats?.fr||FR)/FR),40,250);}
+function magnetRadius(stats){return clamp(MAG_R*(stats?.skills?1+.12*levelProgress(stats.skills.magnet):(stats?.fr||FR)/FR),40,250);}
 function magnetGeometry(s,p,stats){
   const nx=s===2?1:s===3?-1:0,ny=s===0?-1:s===1?1:0;
   const half=(s<2?p.w:p.h)/2,depth=(s<2?p.h:p.w)/2+BR+1;
@@ -39,6 +42,7 @@ function magnetGeometry(s,p,stats){
 }
 // The pressed latch survives checkpoints and prevents auto-restarting on an empty battery.
 function updateMagnetEnergy(gs,s,want,dt=TICK_MS){
+  want=!!want&&skillEquipped(gs,s,'magnet');
   const was=!!gs.magnet[s],pressed=!!want&&!gs.magPressed[s];gs.magPressed[s]=!!want;
   if(abilitiesLocked(gs,s)){gs.magnet[s]=false;gs.magEnergy[s]=gs.energy[s]=0;return was;}
   let active=was&&want&&gs.energy[s]>0;
@@ -366,7 +370,7 @@ function rocketMuzzle(gs,s){
 function requestRocket(gs,s,input,fresh){
   const seq=input.rocket||0;if(seq<=gs.lastRocket[s])return;
   gs.lastRocket[s]=seq;
-  if(!fresh||abilitiesLocked(gs,s)||gs.tick<gs.rocketReadyAt[s]||!enemyTarget(gs,s,input.rocketTarget))return;
+  if(!fresh||!skillEquipped(gs,s,'rocket')||abilitiesLocked(gs,s)||gs.tick<gs.rocketReadyAt[s]||!enemyTarget(gs,s,input.rocketTarget))return;
   if(!spendEnergy(gs,s,.30))return;gs.cloakUntil[s]=0;
   const launchAt=gs.tick+ROCKET_OPEN;
   gs.rocketReadyAt[s]=launchAt+Math.round(ROCKET_RELOAD*(1-.10*skillProgress(gs,s,'rocket')));gs.bayOpenAt[s]=gs.tick;
@@ -416,7 +420,7 @@ const EMP_LOCK=10*TICK_RATE,EMP_CHARGE=30,EMP_SPEED=7,EMP_RANGE=780,EMP_HALF_ANG
 function spendEnergy(gs,s,cost){if(abilitiesLocked(gs,s)||gs.energy[s]+1e-9<cost)return false;gs.energy[s]=round(Math.max(0,gs.energy[s]-cost));gs.magEnergy[s]=gs.energy[s];return true;}
 function requestCloak(gs,s,input,fresh){
  const seq=input.cloak||0;if(seq<=gs.lastCloak[s])return;gs.lastCloak[s]=seq;
- if(!fresh||gs.tick<gs.cloakReadyAt[s]||!spendEnergy(gs,s,skillCost(gs,s,'cloak')))return;
+ if(!fresh||!skillEquipped(gs,s,'cloak')||gs.tick<gs.cloakReadyAt[s]||!spendEnergy(gs,s,skillCost(gs,s,'cloak')))return;
  gs.cloakUntil[s]=gs.tick+600;gs.cloakReadyAt[s]=gs.tick+1800-Math.round(120*skillProgress(gs,s,'cloak'));
  emit(gs,'cloak:activate',{slot:s,tick:gs.tick});
 }
@@ -430,7 +434,7 @@ function goalGeometry(s){
 }
 function requestShield(gs,s,input,fresh){
   const seq=input.shield||0;if(seq<=gs.lastShield[s])return;gs.lastShield[s]=seq;
-  if(!fresh||abilitiesLocked(gs,s)||gs.tick<gs.shieldReadyAt[s]||!spendEnergy(gs,s,.40))return;
+  if(!fresh||!skillEquipped(gs,s,'shield')||abilitiesLocked(gs,s)||gs.tick<gs.shieldReadyAt[s]||!spendEnergy(gs,s,.40))return;
   const p=slotToPaddle(s,gs.paddles[s],gs,gs.config);
   gs.goalShields[s]={startTick:gs.tick,activeAt:gs.tick+SHIELD_DEPLOY,until:gs.tick+SHIELD_DEPLOY+SHIELD_DURATION+Math.round(60*skillProgress(gs,s,'shield')),x:p.x+p.w/2,y:p.y+p.h/2};
   gs.shieldReadyAt[s]=gs.tick+ABILITY_RELOAD;
@@ -439,7 +443,7 @@ function requestShield(gs,s,input,fresh){
 function shieldActive(gs,s){const f=gs.goalShields?.[s];return !!(f&&!gs.eliminated[s]&&gs.tick>=f.activeAt&&gs.tick<f.until);}
 function requestEMP(gs,s,input,fresh){
   const seq=input.emp||0;if(seq<=gs.lastEmp[s])return;gs.lastEmp[s]=seq;
-  if(!fresh||abilitiesLocked(gs,s)||gs.tick<gs.empReadyAt[s]||!Number.isFinite(input.empX)||!Number.isFinite(input.empY))return;
+  if(!fresh||!skillEquipped(gs,s,'emp')||abilitiesLocked(gs,s)||gs.tick<gs.empReadyAt[s]||!Number.isFinite(input.empX)||!Number.isFinite(input.empY))return;
   const p=slotToPaddle(s,gs.paddles[s],gs,gs.config),x=p.x+p.w/2,y=p.y+p.h/2,dx=input.empX-x,dy=input.empY-y;
   const g=goalGeometry(s);if(Math.hypot(dx,dy)<8||dx*g.nx+dy*g.ny<=0)return;
   if(!spendEnergy(gs,s,skillCost(gs,s,'emp')))return;gs.cloakUntil[s]=0;
@@ -550,7 +554,7 @@ function create(options={}) {
   const arr=v=>SLOTS.map(()=>typeof v==='function'?v():v);
   for(const s of SLOTS){const p=options.players?.[s]||{},st=p.paddleStats||{};
     config.players[s]={bot:!!p.bot,paddleStats:{shipId:['nexus','swift','bastion','flux'].includes(st.shipId)?st.shipId:'nexus',level:clamp(Math.trunc(st.level||1),1,5),w:clamp(st.w||PL,10,250),spd:clamp(st.spd||PS,.1,50),
-      fr:clamp(st.fr||FR,1,220),fd:clamp(st.fd||1,.1,20),er:clamp(st.er||1,.1,20),...(st.skills?{skills:Object.fromEntries(['push','magnet','rocket','shield','emp','cloak'].map(k=>[k,clamp(Math.trunc(Number(st.skills[k])||1),1,5)]))}:{})}};
+      fr:clamp(st.fr||FR,1,220),fd:clamp(st.fd||1,.1,20),er:clamp(st.er||1,.1,20),...(st.skills?{skills:Object.fromEntries(['push','magnet','rocket','shield','emp','cloak'].map(k=>[k,clamp(Math.trunc(Number(st.skills[k])||1),1,MAX_SKILL_LEVEL)]))}:{}),...(Object.prototype.hasOwnProperty.call(st,'equippedSkills')?{equippedSkills:Array.isArray(st.equippedSkills)?[...new Set(st.equippedSkills.filter(key=>ACTIVE_SKILLS.includes(key)))].slice(0,4):[]}:{} )}};
   }
   const gs={version:VERSION,config,tick:0,rng:(options.seed??123456789)>>>0,nextBallId:1,
     paddles:arr(260),paddlesPrev:arr(260),balls:[],respawns:[],lives:arr(ML),scores:arr(0),
@@ -649,13 +653,13 @@ function step(gs,commands={},systems=[]) {
     input=gs.inputs[s];
     // An absent client cannot keep moving/holding magnet indefinitely.
     const fresh=gs.connected[s]&&gs.tick-input.tick<=8;
-    if((!gs.config.emptyStartEnergy||gs.nextBallId>1)&&!f.active&&!abilitiesLocked(gs,s)&&!(fresh&&input.magnet))gs.energy[s]=Math.min(1,gs.energy[s]+ECR*TICK_MS*stats.er);
+    if((!gs.config.emptyStartEnergy||gs.nextBallId>1)&&!f.active&&!abilitiesLocked(gs,s)&&!(fresh&&input.magnet&&skillEquipped(gs,s,'magnet')))gs.energy[s]=Math.min(1,gs.energy[s]+ECR*TICK_MS*stats.er);
     const wanted=input.target===null?input.dx*stats.spd:clamp(input.target-gs.paddles[s],-stats.spd,stats.spd);
     const limits=gateBounds(gs);
     gs.paddles[s]=round(clamp(gs.paddles[s]+(fresh&&gs.tick>=gs.stunUntil[s]?wanted:0),limits.min+stats.w/2,limits.max-stats.w/2));
     requestCloak(gs,s,input,fresh);requestRocket(gs,s,input,fresh);requestShield(gs,s,input,fresh);requestEMP(gs,s,input,fresh);
     if(input.boost>gs.lastBoost[s]){gs.lastBoost[s]=input.boost;
-      if(fresh&&!abilitiesLocked(gs,s)&&!f.active&&gs.energy[s]>=skillCost(gs,s,'push')){f.active=true;f.t=0;f.r=0;f.maxR=stats.fr;gs.energy[s]-=skillCost(gs,s,'push');gs.cloakUntil[s]=0;
+      if(fresh&&skillEquipped(gs,s,'push')&&!abilitiesLocked(gs,s)&&!f.active&&gs.energy[s]>=skillCost(gs,s,'push')){f.active=true;f.t=0;f.r=0;f.maxR=stats.fr;gs.energy[s]-=skillCost(gs,s,'push');gs.cloakUntil[s]=0;
         emit(gs,'event:field',{type:'activate',slot:s,tick:gs.tick,paddleX:gs.paddles[s],maxR:f.maxR});}}
     if(updateMagnetEnergy(gs,s,fresh&&input.magnet)){
       let i=0;for(const b of gs.balls)if(b['mag_held_'+s])releaseMagnetBall(gs,s,b,i++,gs.config);
@@ -708,5 +712,5 @@ function copyPhysics(value){
 function checkpoint(gs){const out={};for(const key of Object.keys(gs))out[key]=key==='events'?[]:copyPhysics(gs[key]);return out;}
 function hash(gs){const s=checkpoint(gs),str=JSON.stringify(s,(_key,value)=>value&&typeof value==='object'&&!Array.isArray(value)?Object.fromEntries(Object.keys(value).sort().map(k=>[k,value[k]])):value);let h=2166136261;
   for(let i=0;i<str.length;i++)h=Math.imul(h^str.charCodeAt(i),16777619);return (h>>>0).toString(16);}
-return {gateReduction,gateBounds,collideGate,skillCost,VERSION,MAX_LIVES:ML,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall,circleSweep,enemyTarget,rocketMuzzle,abilitiesLocked,cloaked,shipVisibility,goalGeometry,shieldActive,constants:{C,W,H,ROCKET_RELOAD,ROCKET_STUN,ROCKET_OPEN,SHIELD_DEPLOY,SHIELD_DURATION,ABILITY_RELOAD,EMP_LOCK,EMP_CHARGE,EMP_SPEED,EMP_RANGE,EMP_HALF_ANGLE}};
+return {gateReduction,gateBounds,collideGate,skillCost,skillProgress,skillEquipped,MAX_SKILL_LEVEL,VERSION,MAX_LIVES:ML,TICK_RATE,TICK_MS,SLOTS,create,step,clone,checkpoint,hash,slotToPaddle,paddleContact,applyFFBall,magnetRadius,magnetGeometry,updateMagnetEnergy,applyMagnetBall,releaseMagnetBall,circleSweep,enemyTarget,rocketMuzzle,abilitiesLocked,cloaked,shipVisibility,goalGeometry,shieldActive,constants:{C,W,H,ROCKET_RELOAD,ROCKET_STUN,ROCKET_OPEN,SHIELD_DEPLOY,SHIELD_DURATION,ABILITY_RELOAD,EMP_LOCK,EMP_CHARGE,EMP_SPEED,EMP_RANGE,EMP_HALF_ANGLE}};
 });

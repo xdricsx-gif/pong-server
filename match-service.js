@@ -1,7 +1,7 @@
 'use strict';
 const {randomUUID}=require('node:crypto');
 const P=require('./galaxy-physics'),Rules=require('./match-rules'),{createLedger}=require('./match-ledger');
-const ERRORS={update_required:'Онови гру в Google Play, щоб грати в нових режимах.',auth_required:'Увійди в акаунт повторно.',already_playing:'Спочатку заверши поточний матч або пошук.',not_enough_silver:'Для цього бою потрібно 100 срібла в кожного учасника.',not_enough_energy:'Для тренування потрібно 20 енергії.',offline:'Гравець зараз не в мережі.',busy:'Гравець уже в матчі або пошуку.',invite_pending:'Запрошення цьому гравцю вже надіслано.',invite_rate_limit:'Забагато запрошень. Зачекай хвилину.',invite_expired:'Запрошення вже неактивне.',server_unavailable:'Сервер тимчасово недоступний. Спробуй ще раз.',wrong_uid:'Це запрошення або матч належить іншому гравцю.'};
+const ERRORS={update_required:'Онови гру в Google Play, щоб грати в нових режимах.',auth_required:'Увійди в акаунт повторно.',already_playing:'Спочатку заверши поточний матч або пошук.',not_enough_silver:'Для цього бою потрібно 100 срібла в кожного учасника.',not_enough_energy:'Для тренування потрібно 20 енергії.',offline:'Гравець зараз не в мережі.',busy:'Гравець уже в матчі або пошуку.',invite_pending:'Запрошення цьому гравцю вже надіслано.',invite_rate_limit:'Забагато запрошень. Зачекай хвилину.',invite_expired:'Запрошення вже неактивне.',server_unavailable:'Сервер тимчасово недоступний. Спробуй ще раз.',cancelled_before_start:'Матч скасовано до початку.',wrong_uid:'Це запрошення або матч належить іншому гравцю.'};
 function createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer,startGame,net,getDb,authenticate,loadStats,onSettled=()=>{},now=Date.now,graceMs=30000,rankedWaitMs=10000}){
   const owner=randomUUID(),online=new Map(),profiles=new Map(),inMatch=new Map(),queued=new Map(),queues={ranked:[],team:[]},invites=new Map();
   let ledger,chain=Promise.resolve(),closed=false;
@@ -72,6 +72,19 @@ function createMatchService({io,rooms,createRoom,setPlayer,clearPlayer,getPlayer
     for(let slot=0;slot<uids.length;slot++){const uid=uids[slot];room.roster[slot]={...profiles.get(uid),slot};cancelInvites(uid);}
     for(const uid of uids)inMatch.set(uid,room);rooms.set(room.id,room);
     try{
+      // Invitations and waiting groups can outlive a hangar change. Freeze fresh
+      // authoritative equipment for every participant before any entry fee.
+      let refreshed;
+      try{
+        refreshed=await Promise.all(uids.map(uid=>loadStats(uid,{strict:true})));
+        if(refreshed.some(stats=>!stats||typeof stats!=='object'||Array.isArray(stats)))fail('server_unavailable');
+      }catch(_){fail('server_unavailable');}
+      if(room.cancelled)fail('cancelled_before_start');
+      if(uids.some(uid=>!socketFor(uid)))fail('offline');
+      for(let slot=0;slot<uids.length;slot++){
+        const uid=uids[slot],profile={...profiles.get(uid),paddleStats:P.clone(refreshed[slot])};
+        profiles.set(uid,profile);room.roster[slot]={...profile,slot};
+      }
       const roster=Object.values(room.roster).map(p=>({uid:p.uid,slot:p.slot,nick:p.nick}));
       await store().reserve(room.id,mode,roster);room.reserved=true;
       if(room.cancelled||uids.some(uid=>!socketFor(uid))){await abort(room,'cancelled_before_start');return;}

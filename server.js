@@ -437,19 +437,21 @@ function computePaddleStats(paddleId, hangars) {return UfoFleet.stats(hangars?.[
 //   - paddleId, який гравець не придбав → fallback до 0
 //   - вигадані рівні апгрейдів → обрізаємо до 1..10
 // Якщо Firestore недоступний (db=null) або uid відсутній — дефолтна ракетка.
-async function loadValidatedPaddleStats(uid) {
-  if (!db || !uid) return { ...DEFAULT_PADDLE_STATS };
+async function loadValidatedPaddleStats(uid, {strict=false}={}) {
+  if (!db || !uid) {if(strict)throw Error('server_unavailable');return { ...DEFAULT_PADDLE_STATS };}
   try {
     const [pubSnap, privSnap] = await Promise.all([
       db.collection('users_public').doc(uid).get(),
       db.collection('users_private').doc(uid).get(),
     ]);
+    if(strict&&(!pubSnap.exists||!privSnap.exists))throw Error('server_unavailable');
     const pub = pubSnap.exists ? pubSnap.data() : {};
     const priv = privSnap.exists ? privSnap.data() : {};
 
     // Read the new namespace only. Never overwrite prior purchases or hangars.
     return UfoFleet.fromAccount(priv);
   } catch(e) {
+    if(strict)throw Error('server_unavailable');
     console.error('[paddleStats] load error for uid='+uid+':', e.message);
     return { ...DEFAULT_PADDLE_STATS };
   }
