@@ -77,19 +77,41 @@ test('scan caps remain explicit and suppress percentages from incomplete denomin
   const r=await list(f);assert.equal(r.partial,true);assert.equal(r.totalPlayers,2);
   const retention=await f.api.retention('2026-10-01','2026-10-28');assert.equal(retention.partial,true);assert.equal(retention.d1.percent,null);assert.equal(retention.cohorts[0].d1.percent,null);
 });
-test('authenticated presence writes a union of Kyiv days, crosses midnight without throttle and keeps lastSeen monotonic',async()=>{
-  const {createDashboard}=require('./football-dashboard');const rows=new Map(),created=[];let writes=0;
+test('background authentication updates lastSeen but never records retention day evidence',async()=>{
+  const {createDashboard}=require('./football-dashboard');const {createPlayerActivity}=require('./player-activity');const rows=new Map(),created=[];let writes=0;
   const db={collection(name){return {doc(id){const key=name+'/'+id;return {key,async create(value){created.push(key);rows.set(key,value);}};}}},async runTransaction(fn){await fn({get:async ref=>({data:()=>rows.get(ref.key)}),set(ref,value){writes++;rows.set(ref.key,{...rows.get(ref.key),...value});}});}};
   const d=createDashboard({db,credentials:{},verifyIdToken:async()=>({}),live:()=>({})});
   d.initialize();assert.deepEqual(created.sort(),['dashboard_meta/coverage','dashboard_meta/retention']);
   const original=Date.now;let time=Date.parse('2026-10-25T21:59:59Z');Date.now=()=>time;
-  try{d.presence('one');await new Promise(resolve=>setImmediate(resolve));d.presence('one');await new Promise(resolve=>setImmediate(resolve));assert.equal(writes,1);
+  const key='dashboard_presence/'+createHash('sha256').update('one').digest('hex');
+  const tracker=createPlayerActivity({db,now:()=>0,wallNow:()=>time,setIntervalFn:()=>({unref(){}}),clearIntervalFn:()=>{}});
+  try{
+    d.presence('one');await new Promise(resolve=>setImmediate(resolve));d.presence('one');await new Promise(resolve=>setImmediate(resolve));assert.equal(writes,1);
+    assert.equal(rows.get(key).activeDays,undefined);
     time=Date.parse('2026-10-25T22:00:01Z');d.presence('one');await new Promise(resolve=>setImmediate(resolve));assert.equal(writes,2);
-    const p=rows.get('dashboard_presence/'+createHash('sha256').update('one').digest('hex'));assert.deepEqual(p.activeDays,{'2026-10-25':true,'2026-10-26':true});assert.equal(p.lastSeen,'2026-10-25T22:00:01.000Z');
-  }finally{Date.now=original;}
+    assert.equal(rows.get(key).activeDays,undefined);assert.equal(rows.get(key).lastSeen,'2026-10-25T22:00:01.000Z');
+    const socket={uid:'one',connected:true};tracker.authenticate(socket,'one');await tracker.flush();
+    assert.equal(rows.get(key).activeDays,undefined,'authentication alone is not foreground evidence');
+    tracker.receive(socket,{v:1,seq:1,session:1,foreground:true});await tracker.flush();
+    assert.deepEqual(rows.get(key).activeDays,{'2026-10-26':true},'opening the game records only its observed foreground day');
+    time=Date.parse('2026-10-26T22:00:01Z');d.presence('one');await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(rows.get(key).activeDays,{'2026-10-26':true},'a later background reconnect preserves evidence without adding another return');
+    assert.equal(rows.get(key).lastSeen,'2026-10-26T22:00:01.000Z');
+  }finally{Date.now=original;await tracker.close();}
 });
 test('production activity polling no longer duplicates the dedicated player snapshot scans',async()=>{
   const {createActivity}=require('./dashboard-activity');const f=fixture();let authCalls=0;
   const d=createActivity({db:f.db,includeRecent:false,listAccounts:async()=>{authCalls++;return {users:[]};}});
   const result=await d.get('2026-10-01','2026-10-28');assert.equal(result.recentPlayers,null);assert.equal(authCalls,0);assert.equal(f.reads.get('users_public'),undefined);
+});
+test('new player list counts the disjoint ranked, team and raid counters without changing stored values',async()=>{
+  const f=fixture();f.player('all-modes','2026-10-20',{}, {gamesPlayed:2,teamGamesPlayed:3,trainingGamesPlayed:7});f.player('raids-only','2026-10-20',{}, {trainingGamesPlayed:5});f.player('ranked-only','2026-10-20',{}, {gamesPlayed:6});
+  const r=await list(f,{sort:'gamesPlayed',direction:'desc'});assert.deepEqual(r.rows.map(p=>[p.uid,p.gamesPlayed]),[['all-modes',12],['ranked-only',6],['raids-only',5]]);
+  assert.equal(f.data.get('users_public/all-modes').gamesPlayed,2);assert.equal(f.data.get('users_public/all-modes').teamGamesPlayed,3);assert.equal(f.data.get('users_public/all-modes').trainingGamesPlayed,7);
+});
+test('unknown-retention drilldowns exclude anonymous profiles just like the cohort metric',async()=>{
+  const f=fixture();f.data.delete('dashboard_meta/retention');f.player('registered','2026-10-20');f.player('anonymous','2026-10-20',{}, {isAnonymous:true});
+  const retention=await f.api.retention('2026-10-20','2026-10-20');assert.equal(retention.d1.unknown,1);assert.equal(retention.excludedAnonymous,1);
+  const r=await list(f,{registeredFrom:'2026-10-20',registeredTo:'2026-10-20',retentionDay:1,retentionStatus:'unknown'});assert.equal(r.total,retention.d1.unknown);assert.deepEqual(r.rows.map(p=>p.uid),['registered']);
+  assert.equal((await list(f)).total,2);
 });

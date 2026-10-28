@@ -45,7 +45,7 @@ function matches(p,f){
   if(f.timeStatus==='measured'&&!measured||f.timeStatus==='unmeasured'&&measured)return false;
   if(f.minMinutes!==null&&(!measured||p.foregroundSeconds<f.minMinutes*60))return false;
   if(f.maxMinutes!==null&&(!measured||p.foregroundSeconds>f.maxMinutes*60))return false;
-  if(f.retentionDay&&p.retention['d'+f.retentionDay]!==f.retentionStatus)return false;
+  if(f.retentionDay&&(p.isAnonymous||p.retention['d'+f.retentionDay]!==f.retentionStatus))return false;
   return true;
 }
 function compare(field,direction){return (a,b)=>{
@@ -75,12 +75,12 @@ function createPlayerAnalytics({db,listAccounts,now=Date.now,maxRows=50000,cache
     // Reuse one bounded snapshot across all filters/pages. No profile-per-row
     // lookup and no new Firebase scan on each sorting action.
     const [profiles,presence,auth,meta]=await Promise.all([
-      collection('users_public',['nickname','gamesPlayed','rating','isAnonymous']),
+      collection('users_public',['nickname','gamesPlayed','teamGamesPlayed','trainingGamesPlayed','rating','isAnonymous']),
       collection('dashboard_presence',['lastSeen','foregroundSeconds','measuredSince','lastForegroundAt','activeDays']),
       accounts(),db.collection('dashboard_meta').doc('retention').get()
     ]);
     const byId=new Map(presence.rows.map(p=>[p.id,p]));
-    const rows=profiles.rows.map(p=>{const activity=byId.get(hash(p.id))||{};return {uid:p.id,nickname:p.nickname||'Гість',createdAt:auth.rows.get(p.id)||null,registrationSource:auth.rows.has(p.id)?'firebase_auth':null,gamesPlayed:finite(p.gamesPlayed),rating:finite(p.rating),isAnonymous:p.isAnonymous===true,...playtime(activity),activeDays:activity.activeDays||{}};});
+    const rows=profiles.rows.map(p=>{const activity=byId.get(hash(p.id))||{};return {uid:p.id,nickname:p.nickname||'Гість',createdAt:auth.rows.get(p.id)||null,registrationSource:auth.rows.has(p.id)?'firebase_auth':null,gamesPlayed:finite(p.gamesPlayed)+finite(p.teamGamesPlayed)+finite(p.trainingGamesPlayed),rating:finite(p.rating),isAnonymous:p.isAnonymous===true,...playtime(activity),activeDays:activity.activeDays||{}};});
     return {rows,partial:profiles.partial||presence.partial||auth.partial,profilesPartial:profiles.partial,presencePartial:presence.partial,authPartial:auth.partial,registrationAvailable:auth.available,startedAt:iso(meta.data()?.startedAt),updatedAt:new Date(now()).toISOString()};
   });}
   function context(s){const today=day(new Date(now()));const startDay=day(s.startedAt);return {today,startedAt:s.startedAt,coverageDay:startDay?shiftDay(startDay,1):null,presencePartial:s.presencePartial};}

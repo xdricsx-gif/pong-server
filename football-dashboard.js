@@ -4,7 +4,6 @@ const {GoogleAuth}=require('google-auth-library');
 const {PACKAGE,day,aggregateInstalls,summarizeOrders}=require('./dashboard-data');
 const {createActivity}=require('./dashboard-activity');
 const {createPlayerAnalytics}=require('./dashboard-player-analytics');
-const {retentionPresenceFields}=require('./dashboard-retention-tracking');
 const {shiftDay}=require('./dashboard-time');
 const {createPlayReports}=require('./dashboard-play-reports');
 const PUBLIC_FIREBASE={apiKey:'AIzaSyCLri9CBFVYbdXzIuJ4QLc9Lm7YNkaD9Ac',authDomain:'crazy-footbal.firebaseapp.com',projectId:'crazy-footbal',appId:'1:348183694114:web:303c7ef63e5f0a857c337b'};
@@ -84,9 +83,9 @@ function createDashboard({db,pushService,verifyIdToken,listAccounts,credentials,
     if(!uid||(previous&&at-previous<300000&&day(previous)===day(at)))return;
     seen.set(uid,at);if(seen.size>10000)seen.clear();
     const id=createHash('sha256').update(uid).digest('hex'),ref=db.collection('dashboard_presence').doc(id),stamp=new Date(at).toISOString();
-    // A login counts on its observed Kyiv day, independently of client version.
-    // Transactional union prevents a concurrent heartbeat from losing a day.
-    db.runTransaction(async tx=>{const saved=(await tx.get(ref)).data()||{};const fields={lastSeen:[isoPresence(saved.lastSeen),stamp].filter(Boolean).sort().at(-1),...retentionPresenceFields(saved,at)};tx.set(ref,fields,{mergeFields:Object.keys(fields)});}).catch(()=>{failureCount++;if(seen.get(uid)===at)seen.delete(uid);});
+    // Socket authentication may reconnect while the game is hidden. It updates
+    // lastSeen only; exact retention days require accepted foreground activity.
+    db.runTransaction(async tx=>{const saved=(await tx.get(ref)).data()||{};const fields={lastSeen:[isoPresence(saved.lastSeen),stamp].filter(Boolean).sort().at(-1)};tx.set(ref,fields,{mergeFields:Object.keys(fields)});}).catch(()=>{failureCount++;if(seen.get(uid)===at)seen.delete(uid);});
   }
   function isoPresence(value){try{const d=value?.toDate?value.toDate():new Date(value);return Number.isFinite(d.getTime())?d.toISOString():null;}catch{return null;}}
   function match(room,training){return activityData.record(room,training).catch(()=>{failureCount++;});}
