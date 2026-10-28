@@ -1,0 +1,32 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+class Element{
+ constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.attributes={};this.value='';this.hidden=false;this.disabled=false;this._text='';}
+ set textContent(v){this._text=String(v);this.children=[];}get textContent(){return this._text+this.children.map(c=>c.textContent).join('');}
+ set innerHTML(v){throw Error('Unsafe renderer');}
+ append(...items){this.children.push(...items);}replaceChildren(...items){this._text='';this.children=[];this.append(...items);}setAttribute(k,v){this.attributes[k]=v;}scrollIntoView(){}reportValidity(){return true;}
+}
+const initial={q:'',sort:'createdAt',direction:'desc',registeredFrom:'',registeredTo:'',lastSeenFrom:'',lastSeenTo:'',minMinutes:'',maxMinutes:'',timeStatus:'all'};
+function fixture(overrides={}){
+ const ids=new Map(),get=id=>{if(!ids.has(id))ids.set(id,new Element('div'));return ids.get(id);};
+ for(const [id,defaults]of [['player-filters',initial],['retention-filters',{from:'',to:''}]]){const f=get(id);f.values={};for(const [key,value]of Object.entries(defaults)){const input=new Element('input');input.value=value;f.values[key]=input;}f.elements={namedItem:name=>f.values[name]};f.reset=()=>{f.onreset?.();for(const [key,value]of Object.entries(defaults))f.values[key].value=value;};}
+ let user={getIdToken:async()=> 'owner'},playersCall=0;const calls=[],list={rows:[{uid:'uid<safe>',nickname:'<b>Nick</b>',createdAt:'2026-10-25T01:30:00Z',lastSeen:null,foregroundSeconds:null,gamesPlayed:1,rating:600},{uid:'zero',nickname:'Zero',foregroundSeconds:0}],page:1,pages:2,pageSize:25,total:26,totalPlayers:30,updatedAt:'2026-10-28T10:00:00Z',partial:false};
+ const stat={eligible:4,returned:1,percent:25,pending:2,unknown:3};const retention={cohortPlayers:9,coverageFrom:'2026-10-20T12:00Z',coverageDay:'2026-10-21',updatedAt:'2026-10-28T10:00:00Z',d1:stat,d7:{eligible:0,returned:0,percent:null,pending:4,unknown:5},cohorts:[{date:'2026-10-24',players:4,d1:stat,d7:stat}]};
+ const context={document:{getElementById:get,createElement:t=>new Element(t),querySelectorAll:()=>[]},Intl,Date,Number,String,Object,Promise,URLSearchParams,Map,Set,AbortController,setTimeout,clearTimeout,FormData:class{constructor(form){this.entries=Object.entries(form.values).map(([k,input])=>[k,input.value]);}[Symbol.iterator](){return this.entries[Symbol.iterator]();}},GalaxyDashboardTime:require('./dashboard-time'),fetch:async(url,opts)=>{calls.push({url,opts});let d;if(overrides.fetch)d=await overrides.fetch(url,calls.length);if(d===undefined)d=url.includes('/retention?')?retention:{...list,page:++playersCall===1?1:2};return {ok:true,status:200,json:async()=>d};}};
+ context.globalThis=context;context.getUser=()=>user;vm.createContext(context);vm.runInContext(fs.readFileSync(require.resolve('./dashboard-players-app.js'),'utf8').replace(/^import[^\n]*\n/,'').replaceAll('export function ','function ')+'\nthis.api=initPlayers(getUser);this.linkHTML=playerLinkHTML;',context);
+ const all=()=>[...ids.values()].flatMap(function recur(e){return [e,...e.children.flatMap(recur)];});
+ return {api:context.api,get,calls,list,retention,all,linkHTML:context.linkHTML,setUser:u=>user=u};
+}
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+test('player names are exact UID links, escaped as text; unknown time differs from measured zero',async()=>{
+ const f=fixture();await f.api.load();const rows=f.get('recent-players');assert.match(rows.textContent,/<b>Nick<\/b>/);assert.match(rows.textContent,/Ще не виміряно/);assert.match(rows.textContent,/0 с/);assert.equal(f.all().some(e=>e.tagName==='b'),false);const link=f.all().find(e=>e.tagName==='a'&&e.dataset.playerUid==='uid<safe>');assert.ok(link);assert.equal(link.href,'#admin');assert.match(f.linkHTML({uid:'<"uid',nickname:'<img onerror=x>'}),/data-player-uid="&lt;&quot;uid"/);assert.doesNotMatch(f.linkHTML({uid:'u',nickname:'<img>'}),/<img>/);assert.match(f.get('retention-metrics').textContent,/25%/);assert.match(f.get('retention-metrics').textContent,/—/);assert.match(f.get('retention-metrics').textContent,/Недостатньо історії: 5/);
+});
+test('filters apply only on submit, survive periodic refresh and pagination',async()=>{
+ const f=fixture();await f.api.load();const form=f.get('player-filters');form.values.minMinutes.value='30';form.values.registeredFrom.value='2026-10-01';form.values.sort.value='foregroundSeconds';assert.equal(f.calls.length,2);form.onsubmit({preventDefault(){}});await settle();let query=new URL(f.calls.at(-1).url,'https://local').searchParams;assert.equal(query.get('minMinutes'),'30');assert.equal(query.get('sort'),'foregroundSeconds');assert.equal(query.get('registeredFrom'),'2026-10-01');await f.api.load();query=new URL(f.calls.filter(c=>c.url.includes('/players?')).at(-1).url,'https://local').searchParams;assert.equal(query.get('minMinutes'),'30');form.values.minMinutes.value='99';await f.api.load();query=new URL(f.calls.filter(c=>c.url.includes('/players?')).at(-1).url,'https://local').searchParams;assert.equal(query.get('minMinutes'),'30','unsaved inputs do not silently change applied filters');
+});
+test('retention drilldown supplies exact day/status and reset removes cohort filters',async()=>{
+ const f=fixture();await f.api.load();const returned=f.all().find(e=>e.tagName==='button'&&e.textContent==='Хто повернувся →');returned.onclick();await settle();let query=new URL(f.calls.at(-1).url,'https://local').searchParams;assert.equal(query.get('retentionDay'),'1');assert.equal(query.get('retentionStatus'),'returned');assert.ok(query.get('registeredFrom'));assert.equal(f.calls.filter(c=>c.url.includes('/players?')).length,2,'drilldown does not issue an extra reset query');f.get('player-filters').reset();await settle();query=new URL(f.calls.at(-1).url,'https://local').searchParams;assert.equal(query.has('retentionDay'),false);assert.equal(query.has('registeredFrom'),false);
+});
+test('logout clears personal data and late responses cannot repopulate it',async()=>{
+ let resolve;const hold=new Promise(r=>resolve=r);const f=fixture({fetch:()=>hold});const promise=f.api.load();await settle();f.setUser(null);f.api.clear();resolve(f.list);await promise;assert.doesNotMatch(f.get('recent-players').textContent,/Nick|Zero/);assert.equal(f.get('retention-metrics').children.length,0);assert.equal(f.get('player-next').disabled,true);
+});

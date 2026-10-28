@@ -1,6 +1,8 @@
 'use strict';
 const {createHash, randomUUID}=require('node:crypto');
 const {performance}=require('node:perf_hooks');
+const {day}=require('./dashboard-time');
+const {retentionPresenceFields}=require('./dashboard-retention-tracking');
 
 // Confirm intervals with two messages, never with an open socket. An offline or
 // crashed session deliberately loses its last unconfirmed tail.
@@ -18,7 +20,8 @@ function createPlayerActivity({db,now=()=>performance.now(),wallNow=Date.now,
     if(!u){
       if(users.size>=maxUsers)return null;
       u={uid,id:hash(uid),window:randomUUID(),sessions:new Set(),intervals:[],totalMs:0,
-        persistedMs:-1,measuredSince:iso(),lastForegroundAt:null,lastTouched:now(),lastSuccess:now(),lastFlush:-Infinity,inFlight:null};
+        persistedMs:-1,activeDays:new Set(),dayVersion:0,persistedDayVersion:0,
+        measuredSince:iso(),lastForegroundAt:null,lastTouched:now(),lastSuccess:now(),lastFlush:-Infinity,inFlight:null};
       users.set(uid,u);
     }
     return u;
@@ -64,10 +67,14 @@ function createPlayerActivity({db,now=()=>performance.now(),wallNow=Date.now,
     const u=users.get(r.uid)||(payload.foreground?state(r.uid):null);
     if(!u)return false;
     const wasActive=r.active,gap=t-r.last;
-    if(wasActive&&r.session===payload.session&&gap>=0&&gap<=heartbeatGapMs)interval(u,r.last,t);
+    const confirmedInterval=wasActive&&r.session===payload.session&&gap>=0&&gap<=heartbeatGapMs;
+    if(confirmedInterval)interval(u,r.last,t);
     r.active=payload.foreground;r.session=payload.session;r.last=t;u.lastTouched=t;
     if(r.active)u.sessions.add(r);else u.sessions.delete(r);
     if(r.active||wasActive)u.lastForegroundAt=iso();
+    // A foreground receipt is day evidence even when there is no confirmed
+    // duration yet. A confirmed stop also covers the midnight it crossed.
+    if(r.active||confirmedInterval){const currentDay=day(u.lastForegroundAt);if(!u.activeDays.has(currentDay)){u.activeDays.add(currentDay);u.dayVersion++;}}
     if(wasActive&&!r.active)void flush(r.uid,true);
     return true;
   }
@@ -93,8 +100,8 @@ function createPlayerActivity({db,now=()=>performance.now(),wallNow=Date.now,
   }
   async function persist(u){
     if(u.inFlight)return u.inFlight;
-    if(u.persistedMs===u.totalMs||!u.lastForegroundAt)return;
-    const target={totalMs:u.totalMs,lastForegroundAt:u.lastForegroundAt};u.lastFlush=now();
+    if((u.persistedMs===u.totalMs&&u.persistedDayVersion===u.dayVersion)||!u.lastForegroundAt)return;
+    const target={totalMs:u.totalMs,lastForegroundAt:u.lastForegroundAt,activeDays:[...u.activeDays],dayVersion:u.dayVersion};u.lastFlush=now();
     u.inFlight=enqueueWrite(async()=>{
       try{
         // Cumulative private checkpoints make ambiguous commits safe to retry.
@@ -105,13 +112,14 @@ function createPlayerActivity({db,now=()=>performance.now(),wallNow=Date.now,
           const saved=p.data()||{},applied=finite(c.data()?.appliedMs);
           const delta=Math.max(0,target.totalMs-applied);
           const last=[saved.lastSeen,target.lastForegroundAt].filter(Boolean).sort().at(-1);
-          tx.set(presence,{foregroundSeconds:finite(saved.foregroundSeconds)+delta/1000,
+          const fields={foregroundSeconds:finite(saved.foregroundSeconds)+delta/1000,
             measuredSince:saved.measuredSince||u.measuredSince,
             lastForegroundAt:[saved.lastForegroundAt,target.lastForegroundAt].filter(Boolean).sort().at(-1),
-            lastSeen:last,activityVersion:1},{merge:true});
+            lastSeen:last,activityVersion:1,...retentionPresenceFields(saved,wallNow(),target.activeDays)};
+          tx.set(presence,fields,{mergeFields:Object.keys(fields)});
           tx.set(checkpoint,{appliedMs:Math.max(applied,target.totalMs),expiresAt:new Date(wallNow()+7*86400000)});
         });
-        u.persistedMs=Math.max(u.persistedMs,target.totalMs);u.lastSuccess=now();
+        u.persistedMs=Math.max(u.persistedMs,target.totalMs);u.persistedDayVersion=Math.max(u.persistedDayVersion,target.dayVersion);u.lastSuccess=now();
         try{onChanged(u.uid);}catch{}
       }catch{failures++;}finally{u.inFlight=null;}
     });
@@ -162,12 +170,12 @@ function createPlayerActivity({db,now=()=>performance.now(),wallNow=Date.now,
       // Abandon unconfirmed persistence after a two-hour outage, including
       // active accounts. This is conservative and prevents a very old retry
       // from crediting an expired checkpoint for a second time.
-      if(!u.inFlight&&u.persistedMs!==u.totalMs&&t-u.lastSuccess>7200000){
+      if(!u.inFlight&&(u.persistedMs!==u.totalMs||u.persistedDayVersion!==u.dayVersion)&&t-u.lastSuccess>7200000){
         discardedMs+=Math.max(0,u.totalMs-Math.max(0,u.persistedMs));
         for(const r of u.sessions)r.active=false;
         users.delete(uid);continue;
       }
-      if(!u.sessions.size&&!u.inFlight&&t-u.lastTouched>idleMs&&u.persistedMs===u.totalMs)users.delete(uid);
+      if(!u.sessions.size&&!u.inFlight&&t-u.lastTouched>idleMs&&u.persistedMs===u.totalMs&&u.persistedDayVersion===u.dayVersion)users.delete(uid);
     }
     if(!closed){void flush();void cleanup();}
   }

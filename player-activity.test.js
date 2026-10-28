@@ -6,10 +6,10 @@ function fixture(options={}){
  const db={collection:name=>({doc:id=>({key:name+'/'+id}),where:(field,op,value)=>({limit:count=>({get:async()=>({docs:[...docs].filter(([key,data])=>key.startsWith(name+'/')&&data[field]<value).slice(0,count).map(([key])=>({ref:{key}}))})})})}),async runTransaction(fn){
    transactions++;if(gate)await gate;if(failBefore){failBefore=false;throw Error('offline');}
    const writes=[];await fn({get:async ref=>({data:()=>docs.get(ref.key)}),set:(ref,value,opts)=>writes.push([ref.key,value,opts]),delete:ref=>writes.push([ref.key,null])});
-   for(const [key,value,opts] of writes){if(value===null)docs.delete(key);else docs.set(key,opts?.merge?{...docs.get(key),...value}:value);}
+   for(const [key,value,opts] of writes){if(value===null)docs.delete(key);else docs.set(key,(opts?.merge||opts?.mergeFields)?{...docs.get(key),...value}:value);}
    if(failAfter){failAfter=false;throw Error('response lost after commit');}
  }};
- const tracker=createPlayerActivity({db,now:()=>time,wallNow:()=>Date.UTC(2026,9,24)+time,
+ const tracker=createPlayerActivity({db,now:()=>time,wallNow:()=>(options.wallBase??Date.UTC(2026,9,24))+time,
    setIntervalFn:()=>({unref(){}}),clearIntervalFn:()=>{},...options});
  const socket=(uid='alice',anonymous=false)=>{const s={uid,connected:true};tracker.authenticate(s,uid,{anonymous});return s;};
  const send=(s,t,foreground=true,seq)=>{time=t;s.seq=seq??(s.seq||0)+1;if(foreground&&s.wasForeground!==true)s.session=(s.session||0)+1;s.wasForeground=foreground;return tracker.receive(s,{v:1,seq:s.seq,session:s.session||1,foreground});};
@@ -131,4 +131,63 @@ test('shop auth ACK is bound to the latest verified request and a live socket',a
  assert.equal(socket.uid,'new');assert.equal(acks.length,1);assert.equal(acks[0].activityVersion,1);assert.deepEqual(seen,['new']);assert.equal(authenticated.length,1);
  const disconnected=handlers.get('shop:auth')({idToken:'later'},result=>acks.push(result));socket.connected=false;pending[2].args.onVerified({uid:'later',anonymous:false});pending[2].resolve('later');await disconnected;
  assert.equal(socket.uid,'new');assert.equal(acks.length,1);
+});
+
+
+test('first foreground receipt records an active day without inventing duration',async()=>{
+ const f=fixture(),s=f.socket();f.send(s,0);await f.tracker.close();
+ assert.equal(f.presence().foregroundSeconds,0);
+ assert.deepEqual(f.presence().activeDays,{'2026-10-24':true});
+});
+test('a later zero-duration return persists the new day even when playtime is unchanged',async()=>{
+ const f=fixture(),s=f.socket();f.send(s,0);await f.tracker.flush();
+ f.send(s,86400000);await f.tracker.flush();
+ assert.equal(f.presence().foregroundSeconds,0);
+ assert.deepEqual(f.presence().activeDays,{'2026-10-24':true,'2026-10-25':true});
+ await f.tracker.close();
+});
+test('foreground heartbeats crossing Kyiv midnight retain both exact local dates',async()=>{
+ const f=fixture({wallBase:Date.parse('2026-10-24T20:59:50Z')}),s=f.socket();
+ f.send(s,0);f.send(s,30000);await f.tracker.close();
+ assert.deepEqual(f.presence().activeDays,{'2026-10-24':true,'2026-10-25':true});
+ assert.equal(f.presence().foregroundSeconds,30);
+});
+test('DST clock repetition does not duplicate or shift the active Kyiv day',async()=>{
+ const f=fixture({wallBase:Date.parse('2026-10-25T00:59:50Z')}),s=f.socket();
+ f.send(s,0);f.send(s,30000);await f.tracker.close();
+ assert.deepEqual(f.presence().activeDays,{'2026-10-25':true});
+ assert.equal(f.presence().foregroundSeconds,30);
+});
+test('an idle gap and a delayed flush never create inferred activity days',async()=>{
+ const f=fixture(),s=f.socket();f.send(s,0);f.setTime(2*86400000);await f.tracker.flush();
+ assert.deepEqual(f.presence().activeDays,{'2026-10-24':true});
+ f.send(s,4*86400000);await f.tracker.close();
+ assert.deepEqual(f.presence().activeDays,{'2026-10-24':true,'2026-10-28':true});
+ assert.equal(f.presence().foregroundSeconds,0);
+});
+test('stale background receipt cannot turn a new calendar day into a return',async()=>{
+ const f=fixture(),s=f.socket();f.send(s,0);await f.tracker.flush();
+ f.send(s,86400000,false);await f.tracker.close();
+ assert.deepEqual(f.presence().activeDays,{'2026-10-24':true});
+});
+test('a confirmed foreground interval ending after midnight records the second day',async()=>{
+ const f=fixture({wallBase:Date.parse('2026-10-25T21:59:50Z')}),s=f.socket();
+ f.send(s,0);f.send(s,20000,false);await f.tracker.close();
+ assert.deepEqual(f.presence().activeDays,{'2026-10-25':true,'2026-10-26':true});
+ assert.equal(f.presence().foregroundSeconds,20);
+});
+test('daily tracking preserves old evidence and unrelated presence through ambiguous retries',async()=>{
+ const f=fixture(),s=f.socket(),id=createHash('sha256').update('alice').digest('hex');
+ f.docs.set('dashboard_presence/'+id,{activeDays:{'2026-01-01':true},other:'preserve'});
+ f.send(s,0);f.send(s,30000);f.failAfter();await f.tracker.flush();
+ f.send(s,86400000);await f.tracker.close();
+ assert.deepEqual(f.presence().activeDays,{'2026-01-01':true,'2026-10-24':true,'2026-10-25':true});
+ assert.equal(f.presence().foregroundSeconds,30);assert.equal(f.presence().other,'preserve');
+});
+test('a day added while an older checkpoint is in flight is not lost at close',async()=>{
+ const f=fixture(),s=f.socket();f.send(s,0);let unblock;
+ f.gate(new Promise(resolve=>{unblock=resolve;}));const write=f.tracker.flush();
+ f.send(s,86400000);const closing=f.tracker.close();unblock();await write;await closing;
+ assert.deepEqual(f.presence().activeDays,{'2026-10-24':true,'2026-10-25':true});
+ assert.equal(f.presence().foregroundSeconds,0);
 });

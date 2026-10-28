@@ -11,7 +11,7 @@ function playtime(p={}){
   return {foregroundSeconds:measuredSince&&Number.isFinite(p.foregroundSeconds)?Math.max(0,Math.floor(p.foregroundSeconds)):null,measuredSince,lastSeen:iso(p.lastSeen),lastForegroundAt:iso(p.lastForegroundAt)};
 }
 // One bounded history read per five minutes; successful match writes are overlaid immediately.
-function createActivity({db,listAccounts,now=Date.now,onFailure=()=>{}}){
+function createActivity({db,listAccounts,now=Date.now,onFailure=()=>{},includeRecent=true}){
   const cache=new Map(),overlay=new Map();let lastRecordedAt=null;
   async function cached(key,ttl,fn){
     const old=cache.get(key);if(old&&old.expires>now())return old.promise;
@@ -49,7 +49,7 @@ function createActivity({db,listAccounts,now=Date.now,onFailure=()=>{}}){
     return {rows:players,partial,updatedAt:new Date(now()).toISOString()};
   });}
   async function get(from,to){
-    const result=await Promise.allSettled([history(),recentPlayers(),cached('coverage',300000,async()=>iso((await db.collection('dashboard_meta').doc('coverage').get()).data()?.startedAt))]);
+    const result=await Promise.allSettled([history(),includeRecent?recentPlayers():Promise.resolve(null),cached('coverage',300000,async()=>iso((await db.collection('dashboard_meta').doc('coverage').get()).data()?.startedAt))]);
     const h=result[0].status==='fulfilled'?result[0].value:null;
     const recent=result[1].status==='fulfilled'?result[1].value:null;
     const all=new Map((h?.rows||[]).map(r=>[r.id,r]));

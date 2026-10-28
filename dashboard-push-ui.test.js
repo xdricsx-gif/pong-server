@@ -50,3 +50,9 @@ test('campaign history pagination keeps every campaign reachable and deduplicate
  await f.api.load();assert.equal(f.find('button','Показати попередні сповіщення').hidden,false);await f.find('button','Показати попередні сповіщення').onclick();assert.equal(f.all().filter(e=>e.className==='push-campaign').length,2);assert.equal(f.find('button','Показати попередні сповіщення').hidden,true);assert.match(f.root.textContent,/Показано: 2/);
  await f.api.load();assert.equal(f.all().filter(e=>e.className==='push-campaign').length,1);assert.equal(f.find('button','Показати попередні сповіщення').hidden,false);
 });
+
+test('nicknames in push selection and recipients link to profiles without becoming send actions',async()=>{
+ const f=fixture();f.campaign.recipients[0].uid='u<&>';f.api.selectPlayer({uid:'u<&>',nickname:'<unsafe>'});
+ let links=f.all().filter(e=>e.tagName==='a');assert.equal(links.length,1);assert.equal(links[0].dataset.playerUid,'u<&>');assert.equal(links[0].href,'#admin');assert.equal(links[0].onclick,undefined);assert.equal(f.calls.length,0);
+ await f.api.load();await f.find('button',e=>e.className==='push-campaign').onclick();links=f.all().filter(e=>e.tagName==='a');assert.ok(links.some(e=>e.dataset.playerUid==='u<&>'&&e.textContent==='<b>Alice</b>'));assert.ok(f.calls.every(c=>c.opts.method==='GET'));
+});

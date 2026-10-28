@@ -3,15 +3,18 @@ const fs=require('node:fs');const path=require('node:path');const {createHash}=r
 const {GoogleAuth}=require('google-auth-library');
 const {PACKAGE,day,aggregateInstalls,summarizeOrders}=require('./dashboard-data');
 const {createActivity}=require('./dashboard-activity');
+const {createPlayerAnalytics}=require('./dashboard-player-analytics');
+const {retentionPresenceFields}=require('./dashboard-retention-tracking');
 const {shiftDay}=require('./dashboard-time');
 const {createPlayReports}=require('./dashboard-play-reports');
 const PUBLIC_FIREBASE={apiKey:'AIzaSyCLri9CBFVYbdXzIuJ4QLc9Lm7YNkaD9Ac',authDomain:'crazy-footbal.firebaseapp.com',projectId:'crazy-footbal',appId:'1:348183694114:web:303c7ef63e5f0a857c337b'};
 function createDashboard({db,pushService,verifyIdToken,listAccounts,credentials,live,onPlayerChanged,bucket=process.env.PLAY_REPORTS_BUCKET||'pubsite_prod_6971140736608519774',owner=process.env.DASHBOARD_OWNER_EMAIL||'xdricsx@gmail.com'}) {
-  const playerAdmin=require('./dashboard-admin').createAdmin({db,onChanged:async uid=>{cache.clear();activityData.invalidatePlayers();await onPlayerChanged?.(uid);}});
+  const playerAdmin=require('./dashboard-admin').createAdmin({db,onChanged:async uid=>{cache.clear();activityData.invalidatePlayers();playerAnalytics.invalidate();await onPlayerChanged?.(uid);}});
   const storageAuth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/devstorage.read_only']});
   const playAuth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/androidpublisher']});
   const cache=new Map(); const rates=new Map(); let failureCount=0,lastManualRefresh=0;
-  const activityData=createActivity({db,listAccounts,onFailure:()=>failureCount++});
+  const activityData=createActivity({db,listAccounts,includeRecent:false,onFailure:()=>failureCount++});
+  const playerAnalytics=createPlayerAnalytics({db,listAccounts});
   const playReports=createPlayReports({db,bucket,download:({bucket,name,signal})=>google(storageAuth,`https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encodeURIComponent(name)}?alt=media`,{responseType:'arraybuffer',signal})});
   async function cached(key,ms,fn){let c=cache.get(key);if(c && c.until>Date.now())return c.promise;const promise=fn();cache.set(key,{until:Date.now()+ms,promise});try{return await promise;}catch(e){if(cache.get(key)?.promise===promise)cache.delete(key);throw e;}}
   async function google(auth,url,opts={}){const client=await auth.getClient();try{return (await client.request({url,method:'GET',timeout:20000,...opts})).data;}catch(e){let body=e.response?.data;try{if(body?.text)body=await body.text();if(Buffer.isBuffer(body)||ArrayBuffer.isView(body)||body instanceof ArrayBuffer)body=Buffer.from(body).toString();if(typeof body==='string')body=JSON.parse(body);e.reportReason=body?.error?.errors?.[0]?.reason||body?.error?.status||'unknown';}catch{}throw e;}}
@@ -28,7 +31,7 @@ function createDashboard({db,pushService,verifyIdToken,listAccounts,credentials,
   async function activity(from,to){return {generatedAt:new Date().toISOString(),from,to,timezone:'Europe/Kyiv',live:live(),...await activityData.get(from,to)};}
   async function order(orderId){if(!orderId || !/^GPA\.[\w.-]+$/.test(orderId))return null;return cached('order:'+orderId,15*60000,()=>google(playAuth,`https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PACKAGE}/orders/${encodeURIComponent(orderId)}?fields=state,total,developerRevenueInBuyerCurrency,createTime`));}
   async function summary(from,to,refresh=false){
-    if(refresh&&Date.now()-lastManualRefresh>=60000){lastManualRefresh=Date.now();cache.delete('base');activityData.invalidatePlayers();}
+    if(refresh&&Date.now()-lastManualRefresh>=60000){lastManualRefresh=Date.now();cache.delete('base');activityData.invalidatePlayers();playerAnalytics.invalidate();}
     const [b,r,a]=await Promise.all([base(),playReports.get({refresh}),activity(from,to)]);
     const ledger=b.ledger?.rows.filter(p=>day(p.grantedAt)>=from && day(p.grantedAt)<=to)||[];
     const orders=new Map();const ids=[...new Set(ledger.filter(p=>!p.testPurchase).map(p=>p.orderId).filter(Boolean))];
@@ -36,7 +39,7 @@ function createDashboard({db,pushService,verifyIdToken,listAccounts,credentials,
     const profiles=b.profiles?.rows||[];
     return {...a,generatedAt:new Date().toISOString(),summaryUpdatedAt:b.updatedAt,
       installs:r.ok?{...Object.fromEntries(Object.entries(r).filter(([key])=>key!=='rows')),...aggregateInstalls(r.rows,from,to)}:r,
-      audience:b.profiles?{total:profiles.length,partial:b.profiles.partial,newProfiles:profiles.filter(p=>day(p.createdAt)>=from&&day(p.createdAt)<=to).length,played:profiles.filter(p=>(p.gamesPlayed||0)>0).length,participations:profiles.reduce((s,p)=>s+(p.gamesPlayed||0),0),leaders:profiles.sort((a,b)=>(b.gamesPlayed||0)-(a.gamesPlayed||0)).slice(0,20).map(p=>({nickname:p.nickname||'Гість',games:p.gamesPlayed||0,wins:p.wins||0,rating:p.rating||0})),seenToday:b.presence?b.presence.rows.filter(p=>day(p.lastSeen)===day(new Date())).length:null}:null,
+      audience:b.profiles?{total:profiles.length,partial:b.profiles.partial,newProfiles:profiles.filter(p=>day(p.createdAt)>=from&&day(p.createdAt)<=to).length,played:profiles.filter(p=>(p.gamesPlayed||0)>0).length,participations:profiles.reduce((s,p)=>s+(p.gamesPlayed||0),0),leaders:profiles.sort((a,b)=>(b.gamesPlayed||0)-(a.gamesPlayed||0)).slice(0,20).map(p=>({uid:p.id,nickname:p.nickname||'Гість',games:p.gamesPlayed||0,wins:p.wins||0,rating:p.rating||0})),seenToday:b.presence?b.presence.rows.filter(p=>day(p.lastSeen)===day(new Date())).length:null}:null,
       purchases:b.ledger?{...summarizeOrders(ledger,orders),partial:b.ledger.partial}:null,
       collectionFailures:failureCount,
     };
@@ -47,11 +50,12 @@ function createDashboard({db,pushService,verifyIdToken,listAccounts,credentials,
     const url=new URL(req.url,'http://local');
     const adminRoute=url.pathname.startsWith('/dashboard/api/admin/');
     const importing=url.pathname==='/dashboard/api/import-installs';
+    const playersRoute=url.pathname==='/dashboard/api/players',retentionRoute=url.pathname==='/dashboard/api/retention';
     if(adminRoute?!['GET','POST'].includes(req.method):req.method!==(importing?'POST':'GET'))return send(res,405,{error:'method_not_allowed'});
-    const files={'/dashboard/':'dashboard.html','/dashboard':'dashboard.html','/dashboard/app.js':'dashboard-app.js','/dashboard/style.css':'dashboard-style.css','/dashboard/admin.js':'dashboard-admin-app.js','/dashboard/admin.css':'dashboard-admin.css','/dashboard/time.js':'dashboard-time.js','/dashboard/push.js':'dashboard-push-app.js','/dashboard/push.css':'dashboard-push.css'};
+    const files={'/dashboard/':'dashboard.html','/dashboard':'dashboard.html','/dashboard/app.js':'dashboard-app.js','/dashboard/style.css':'dashboard-style.css','/dashboard/admin.js':'dashboard-admin-app.js','/dashboard/admin.css':'dashboard-admin.css','/dashboard/time.js':'dashboard-time.js','/dashboard/push.js':'dashboard-push-app.js','/dashboard/push.css':'dashboard-push.css','/dashboard/players.js':'dashboard-players-app.js'};
     if(Object.hasOwn(files,url.pathname)){const name=files[url.pathname];return send(res,200,fs.readFileSync(path.join(__dirname,name)),name.endsWith('.js')?'text/javascript; charset=utf-8':name.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8');}
     if(url.pathname==='/dashboard/config')return send(res,200,{firebase:PUBLIC_FIREBASE});
-    if(url.pathname!=='/dashboard/api/summary'&&url.pathname!=='/dashboard/api/activity'&&!importing&&!adminRoute)return send(res,404,{error:'not_found'});
+    if(url.pathname!=='/dashboard/api/summary'&&url.pathname!=='/dashboard/api/activity'&&!importing&&!adminRoute&&!playersRoute&&!retentionRoute)return send(res,404,{error:'not_found'});
     const ip=req.socket.remoteAddress;const at=Date.now();let rate=rates.get(ip);if(!rate||at-rate.at>60000)rates.set(ip,rate={at,n:0});if(rates.size>10000)rates.clear();if(++rate.n>60)return send(res,429,{error:'rate_limit'});
     const token=req.headers.authorization?.match(/^Bearer (.{1,10000})$/)?.[1];if(!token)return send(res,401,{error:'sign_in_required'});
     let user;try{user=await verifyIdToken(token);}catch{return send(res,401,{error:'invalid_session'});}
@@ -68,13 +72,23 @@ function createDashboard({db,pushService,verifyIdToken,listAccounts,credentials,
       if(req.headers.origin&&req.headers.origin!==`https://${req.headers.host}`)return send(res,403,{error:'invalid_origin'});
       try{return send(res,200,await importReports(req));}catch(e){return send(res,e.status||503,{error:e.status?e.message:'import_failed'});}
     }
+    if(playersRoute){try{return send(res,200,await playerAnalytics.list(url.searchParams));}catch(e){return send(res,e.status||503,{error:e.status?e.message:'temporarily_unavailable'});}}
     const to=url.searchParams.get('to')||day(new Date()),from=url.searchParams.get('from')||shiftDay(day(new Date()),-29);
     if(![from,to].every(d=>/^\d{4}-\d{2}-\d{2}$/.test(d)&&day(d)===d)||from>to||to>day(new Date()))return send(res,400,{error:'invalid_dates'});
-    try{send(res,200,url.pathname==='/dashboard/api/activity'?await activity(from,to):await summary(from,to,url.searchParams.get('refresh')==='1'));}catch{send(res,503,{error:'temporarily_unavailable'});}
+    try{send(res,200,retentionRoute?await playerAnalytics.retention(from,to):url.pathname==='/dashboard/api/activity'?await activity(from,to):await summary(from,to,url.searchParams.get('refresh')==='1'));}catch{send(res,503,{error:'temporarily_unavailable'});}
   }
-  function initialize(){db.collection('dashboard_meta').doc('coverage').create({startedAt:new Date().toISOString()}).catch(e=>{if(e.code!==6)failureCount++;});}
+  function initialize(){for(const name of ['coverage','retention'])db.collection('dashboard_meta').doc(name).create({startedAt:new Date().toISOString(),version:1}).catch(e=>{if(e.code!==6&&e.code!=='already-exists')failureCount++;});}
   const seen=new Map();
-  function presence(uid){if(!uid || (seen.get(uid)||0)>Date.now()-300000)return;seen.set(uid,Date.now());if(seen.size>10000)seen.clear();const id=createHash('sha256').update(uid).digest('hex');db.collection('dashboard_presence').doc(id).set({lastSeen:new Date().toISOString()},{merge:true}).catch(()=>failureCount++);}
+  function presence(uid){
+    const at=Date.now(),previous=seen.get(uid);
+    if(!uid||(previous&&at-previous<300000&&day(previous)===day(at)))return;
+    seen.set(uid,at);if(seen.size>10000)seen.clear();
+    const id=createHash('sha256').update(uid).digest('hex'),ref=db.collection('dashboard_presence').doc(id),stamp=new Date(at).toISOString();
+    // A login counts on its observed Kyiv day, independently of client version.
+    // Transactional union prevents a concurrent heartbeat from losing a day.
+    db.runTransaction(async tx=>{const saved=(await tx.get(ref)).data()||{};const fields={lastSeen:[isoPresence(saved.lastSeen),stamp].filter(Boolean).sort().at(-1),...retentionPresenceFields(saved,at)};tx.set(ref,fields,{mergeFields:Object.keys(fields)});}).catch(()=>{failureCount++;if(seen.get(uid)===at)seen.delete(uid);});
+  }
+  function isoPresence(value){try{const d=value?.toDate?value.toDate():new Date(value);return Number.isFinite(d.getTime())?d.toISOString():null;}catch{return null;}}
   function match(room,training){return activityData.record(room,training).catch(()=>{failureCount++;});}
   return {handle,initialize,presence,match};
 }
